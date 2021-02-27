@@ -15,16 +15,16 @@ out vec4 FragColor;
 
 void main()
 {
-    vec3 fragmentNormal = normalize(texture2D(normalTexture, texCoord).xyz * 2.0 - 1.0);
-    vec3 fragmentPosition = S_UnProject(vec3(texCoord, texture2D(depthTexture, texCoord).r), invViewProj);
-    const float specularPower = 80.0;
+    vec3 fragmentNormal = normalize(texture(normalTexture, texCoord).xyz * 2.0 - 1.0);
+    vec3 fragmentPosition = S_UnProject(vec3(texCoord, texture(depthTexture, texCoord).r), invViewProj);
+    float specularPower = 255.0 * texture(normalTexture, texCoord).w;
 
     vec3 h = normalize(lightDirection + (cameraPosition - fragmentPosition));
     float specular = pow(clamp(dot(fragmentNormal, h), 0.0, 1.0), specularPower);
 
     float lambertian = max(dot(fragmentNormal, lightDirection), 0);
 
-    FragColor = texture2D(colorTexture, texCoord);
+    FragColor = texture(colorTexture, texCoord);
     FragColor.xyz += 0.4 * specular;
     FragColor *= lambertian * lightColor;
 }

@@ -2,20 +2,23 @@
 
 layout(location = 0) in vec3 vertexPosition;
 layout(location = 1) in vec2 vertexTexCoord;
-layout(location = 2) in vec3 vertexNormal;
-layout(location = 3) in vec4 vertexTangent;
-layout(location = 4) in vec4 boneWeights;
-layout(location = 5) in vec4 boneIndices;
+layout(location = 2) in vec2 vertexSecondTexCoord;
+layout(location = 3) in vec3 vertexNormal;
+layout(location = 4) in vec4 vertexTangent;
+layout(location = 5) in vec4 boneWeights;
+layout(location = 6) in vec4 boneIndices;
 
 uniform mat4 worldMatrix;
 uniform mat4 worldViewProjection;
 uniform bool useSkeletalAnimation;
 uniform mat4 boneMatrices[60];
 
+out vec3 position;
 out vec3 normal;
 out vec2 texCoord;
 out vec3 tangent;
 out vec3 binormal;
+out vec2 secondTexCoord;
 
 void main()
 {
@@ -57,4 +60,6 @@ void main()
     tangent = normalize(mat3(worldMatrix) * localTangent);
     binormal = normalize(vertexTangent.w * cross(tangent, normal));
     texCoord = vertexTexCoord;
+    secondTexCoord = vertexSecondTexCoord;
+    position = vec3(worldMatrix * localPosition);
 }

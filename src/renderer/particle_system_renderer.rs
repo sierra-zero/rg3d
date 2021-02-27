@@ -1,51 +1,23 @@
 use crate::{
-    scene::{
-        node::Node,
-        particle_system,
-        base::AsBase,
-        graph::Graph,
-        camera::Camera,
-    },
-    core::{
-        scope_profile,
-        math::{
-            vec2::Vec2,
-            Rect,
-        },
-    },
+    core::{algebra::Vector2, math::Matrix4Ext, math::Rect, scope_profile},
     renderer::{
         error::RendererError,
         framework::{
-            gpu_texture::GpuTexture,
-            gpu_program::{
-                GpuProgram,
-                UniformLocation,
-                UniformValue,
+            framebuffer::{CullFace, DrawParameters, FrameBuffer, FrameBufferTrait},
+            geometry_buffer::{
+                AttributeDefinition, AttributeKind, BufferBuilder, ElementKind, GeometryBuffer,
+                GeometryBufferBuilder, GeometryBufferKind,
             },
             gl,
-            geometry_buffer::{
-                GeometryBuffer,
-                GeometryBufferKind,
-                AttributeDefinition,
-                AttributeKind,
-                ElementKind,
-            },
-            framebuffer::{
-                FrameBuffer,
-                DrawParameters,
-                CullFace,
-                FrameBufferTrait,
-            },
-            state::State,
+            gpu_program::{GpuProgram, UniformLocation, UniformValue},
+            gpu_texture::GpuTexture,
+            state::PipelineState,
         },
-        RenderPassStatistics,
-        TextureCache,
+        RenderPassStatistics, TextureCache,
     },
+    scene::{camera::Camera, graph::Graph, node::Node, particle_system},
 };
-use std::{
-    cell::RefCell,
-    rc::Rc,
-};
+use std::{cell::RefCell, rc::Rc};
 
 struct ParticleSystemShader {
     program: GpuProgram,
@@ -63,7 +35,8 @@ impl ParticleSystemShader {
     fn new() -> Result<Self, RendererError> {
         let vertex_source = include_str!("shaders/particle_system_vs.glsl");
         let fragment_source = include_str!("shaders/particle_system_fs.glsl");
-        let program = GpuProgram::from_source("ParticleSystemShader", vertex_source, fragment_source)?;
+        let program =
+            GpuProgram::from_source("ParticleSystemShader", vertex_source, fragment_source)?;
         Ok(Self {
             view_projection_matrix: program.uniform_location("viewProjectionMatrix")?,
             world_matrix: program.uniform_location("worldMatrix")?,
@@ -81,12 +54,12 @@ impl ParticleSystemShader {
 pub struct ParticleSystemRenderer {
     shader: ParticleSystemShader,
     draw_data: particle_system::DrawData,
-    geometry_buffer: GeometryBuffer<particle_system::Vertex>,
+    geometry_buffer: GeometryBuffer,
     sorted_particles: Vec<u32>,
 }
 
-pub struct ParticleSystemRenderContext<'a, 'b, 'c> {
-    pub state: &'a mut State,
+pub(in crate) struct ParticleSystemRenderContext<'a, 'b, 'c> {
+    pub state: &'a mut PipelineState,
     pub framebuffer: &'b mut FrameBuffer,
     pub graph: &'c Graph,
     pub camera: &'c Camera,
@@ -99,17 +72,45 @@ pub struct ParticleSystemRenderContext<'a, 'b, 'c> {
 }
 
 impl ParticleSystemRenderer {
-    pub fn new(state: &mut State) -> Result<Self, RendererError> {
-        let geometry_buffer = GeometryBuffer::new(GeometryBufferKind::DynamicDraw, ElementKind::Triangle);
-
-        geometry_buffer.bind(state)
-            .describe_attributes(vec![
-                AttributeDefinition { kind: AttributeKind::Float3, normalized: false },
-                AttributeDefinition { kind: AttributeKind::Float2, normalized: false },
-                AttributeDefinition { kind: AttributeKind::Float, normalized: false },
-                AttributeDefinition { kind: AttributeKind::Float, normalized: false },
-                AttributeDefinition { kind: AttributeKind::UnsignedByte4, normalized: true },
-            ])?;
+    pub fn new(state: &mut PipelineState) -> Result<Self, RendererError> {
+        let geometry_buffer = GeometryBufferBuilder::new(ElementKind::Triangle)
+            .with_buffer_builder(
+                BufferBuilder::new::<crate::scene::particle_system::Vertex>(
+                    GeometryBufferKind::DynamicDraw,
+                    None,
+                )
+                .with_attribute(AttributeDefinition {
+                    location: 0,
+                    kind: AttributeKind::Float3,
+                    normalized: false,
+                    divisor: 0,
+                })
+                .with_attribute(AttributeDefinition {
+                    location: 1,
+                    kind: AttributeKind::Float2,
+                    normalized: false,
+                    divisor: 0,
+                })
+                .with_attribute(AttributeDefinition {
+                    location: 2,
+                    kind: AttributeKind::Float,
+                    normalized: false,
+                    divisor: 0,
+                })
+                .with_attribute(AttributeDefinition {
+                    location: 3,
+                    kind: AttributeKind::Float,
+                    normalized: false,
+                    divisor: 0,
+                })
+                .with_attribute(AttributeDefinition {
+                    location: 4,
+                    kind: AttributeKind::UnsignedByte4,
+                    normalized: true,
+                    divisor: 0,
+                }),
+            )
+            .build(state)?;
 
         Ok(Self {
             shader: ParticleSystemShader::new()?,
@@ -120,15 +121,22 @@ impl ParticleSystemRenderer {
     }
 
     #[must_use]
-    pub fn render(&mut self, args: ParticleSystemRenderContext) -> RenderPassStatistics {
+    pub(in crate) fn render(&mut self, args: ParticleSystemRenderContext) -> RenderPassStatistics {
         scope_profile!();
 
         let mut statistics = RenderPassStatistics::default();
 
         let ParticleSystemRenderContext {
-            state, framebuffer, graph
-            , camera, white_dummy, depth,
-            frame_width, frame_height, viewport, texture_cache
+            state,
+            framebuffer,
+            graph,
+            camera,
+            white_dummy,
+            depth,
+            frame_width,
+            frame_height,
+            viewport,
+            texture_cache,
         } = args;
 
         state.set_blend_func(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
@@ -145,35 +153,65 @@ impl ParticleSystemRenderer {
                 continue;
             };
 
-            particle_system.generate_draw_data(&mut self.sorted_particles,
-                                               &mut self.draw_data,
-                                               &camera.base().global_position());
+            particle_system.generate_draw_data(
+                &mut self.sorted_particles,
+                &mut self.draw_data,
+                &camera.global_position(),
+            );
 
             self.geometry_buffer
+                .set_buffer_data(state, 0, self.draw_data.vertices());
+            self.geometry_buffer
                 .bind(state)
-                .set_triangles(self.draw_data.get_triangles())
-                .set_vertices(self.draw_data.get_vertices());
+                .set_triangles(self.draw_data.triangles());
 
             let uniforms = [
-                (self.shader.depth_buffer_texture, UniformValue::Sampler { index: 0, texture: depth.clone() }),
-                (self.shader.diffuse_texture, UniformValue::Sampler {
-                    index: 1,
-                    texture: if let Some(texture) = particle_system.texture() {
-                        if let Some(texture) = texture_cache.get(state, texture) {
-                            texture
+                (
+                    self.shader.depth_buffer_texture,
+                    UniformValue::Sampler {
+                        index: 0,
+                        texture: depth.clone(),
+                    },
+                ),
+                (
+                    self.shader.diffuse_texture,
+                    UniformValue::Sampler {
+                        index: 1,
+                        texture: if let Some(texture) = particle_system.texture() {
+                            if let Some(texture) = texture_cache.get(state, texture) {
+                                texture
+                            } else {
+                                white_dummy.clone()
+                            }
                         } else {
                             white_dummy.clone()
-                        }
-                    } else {
-                        white_dummy.clone()
+                        },
                     },
-                }),
-                (self.shader.camera_side_vector, UniformValue::Vec3(camera_side)),
-                (self.shader.camera_up_vector, UniformValue::Vec3(camera_up)),
-                (self.shader.view_projection_matrix, UniformValue::Mat4(camera.view_projection_matrix())),
-                (self.shader.world_matrix, UniformValue::Mat4(node.base().global_transform())),
-                (self.shader.inv_screen_size, UniformValue::Vec2(Vec2::new(1.0 / frame_width, 1.0 / frame_height))),
-                (self.shader.proj_params, UniformValue::Vec2(Vec2::new(camera.z_far(), camera.z_near())))
+                ),
+                (
+                    self.shader.camera_side_vector,
+                    UniformValue::Vector3(camera_side),
+                ),
+                (
+                    self.shader.camera_up_vector,
+                    UniformValue::Vector3(camera_up),
+                ),
+                (
+                    self.shader.view_projection_matrix,
+                    UniformValue::Matrix4(camera.view_projection_matrix()),
+                ),
+                (
+                    self.shader.world_matrix,
+                    UniformValue::Matrix4(node.global_transform()),
+                ),
+                (
+                    self.shader.inv_screen_size,
+                    UniformValue::Vector2(Vector2::new(1.0 / frame_width, 1.0 / frame_height)),
+                ),
+                (
+                    self.shader.proj_params,
+                    UniformValue::Vector2(Vector2::new(camera.z_far(), camera.z_near())),
+                ),
             ];
 
             let draw_params = DrawParameters {
@@ -191,7 +229,7 @@ impl ParticleSystemRenderer {
                 state,
                 viewport,
                 &self.shader.program,
-                draw_params,
+                &draw_params,
                 &uniforms,
             );
         }

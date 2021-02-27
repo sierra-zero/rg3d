@@ -1,35 +1,27 @@
+use crate::core::algebra::{Matrix4, Vector3};
 use crate::{
-    core::{
-        math::{
-            vec3::Vec3,
-            mat4::Mat4,
-        },
-        pool::Handle,
-    },
+    core::pool::Handle,
     resource::fbx::{
+        document::{FbxNode, FbxNodeContainer},
         scene::FbxComponent,
-        document::{
-            FbxNode,
-            FbxNodeContainer
-        },
     },
 };
 
 pub struct FbxModel {
     pub name: String,
-    pub pre_rotation: Vec3,
-    pub post_rotation: Vec3,
-    pub rotation_offset: Vec3,
-    pub rotation_pivot: Vec3,
-    pub scaling_offset: Vec3,
-    pub scaling_pivot: Vec3,
-    pub rotation: Vec3,
-    pub scale: Vec3,
-    pub translation: Vec3,
-    pub geometric_translation: Vec3,
-    pub geometric_rotation: Vec3,
-    pub geometric_scale: Vec3,
-    pub inv_bind_transform: Mat4,
+    pub pre_rotation: Vector3<f32>,
+    pub post_rotation: Vector3<f32>,
+    pub rotation_offset: Vector3<f32>,
+    pub rotation_pivot: Vector3<f32>,
+    pub scaling_offset: Vector3<f32>,
+    pub scaling_pivot: Vector3<f32>,
+    pub rotation: Vector3<f32>,
+    pub scale: Vector3<f32>,
+    pub translation: Vector3<f32>,
+    pub geometric_translation: Vector3<f32>,
+    pub geometric_rotation: Vector3<f32>,
+    pub geometric_scale: Vector3<f32>,
+    pub inv_bind_transform: Matrix4<f32>,
     pub geoms: Vec<Handle<FbxComponent>>,
     /// List of handles of materials
     pub materials: Vec<Handle<FbxComponent>>,
@@ -42,7 +34,10 @@ pub struct FbxModel {
 }
 
 impl FbxModel {
-    pub fn read(model_node_handle: Handle<FbxNode>, nodes: &FbxNodeContainer) -> Result<FbxModel, String> {
+    pub fn read(
+        model_node_handle: Handle<FbxNode>,
+        nodes: &FbxNodeContainer,
+    ) -> Result<FbxModel, String> {
         let mut name = String::from("Unnamed");
 
         let model_node = nodes.get(model_node_handle);
@@ -57,19 +52,19 @@ impl FbxModel {
 
         let mut model = FbxModel {
             name,
-            pre_rotation: Vec3::ZERO,
-            post_rotation: Vec3::ZERO,
-            rotation_offset: Vec3::ZERO,
-            rotation_pivot: Vec3::ZERO,
-            scaling_offset: Vec3::ZERO,
-            scaling_pivot: Vec3::ZERO,
-            rotation: Vec3::ZERO,
-            scale: Vec3::UNIT,
-            translation: Vec3::ZERO,
-            geometric_translation: Vec3::ZERO,
-            geometric_rotation: Vec3::ZERO,
-            geometric_scale: Vec3::UNIT,
-            inv_bind_transform: Mat4::IDENTITY,
+            pre_rotation: Vector3::default(),
+            post_rotation: Vector3::default(),
+            rotation_offset: Vector3::default(),
+            rotation_pivot: Vector3::default(),
+            scaling_offset: Vector3::default(),
+            scaling_pivot: Vector3::default(),
+            rotation: Vector3::default(),
+            scale: Vector3::new(1.0, 1.0, 1.0),
+            translation: Vector3::default(),
+            geometric_translation: Vector3::default(),
+            geometric_rotation: Vector3::default(),
+            geometric_scale: Vector3::new(1.0, 1.0, 1.0),
+            inv_bind_transform: Matrix4::identity(),
             geoms: Vec::new(),
             materials: Vec::new(),
             animation_curve_nodes: Vec::new(),
@@ -92,10 +87,12 @@ impl FbxModel {
                 "RotationPivot" => model.rotation_pivot = property_node.get_vec3_at(4)?,
                 "ScalingOffset" => model.scaling_offset = property_node.get_vec3_at(4)?,
                 "ScalingPivot" => model.scaling_pivot = property_node.get_vec3_at(4)?,
-                "GeometricTranslation" => model.geometric_translation = property_node.get_vec3_at(4)?,
+                "GeometricTranslation" => {
+                    model.geometric_translation = property_node.get_vec3_at(4)?
+                }
                 "GeometricScaling" => model.geometric_scale = property_node.get_vec3_at(4)?,
                 "GeometricRotation" => model.geometric_rotation = property_node.get_vec3_at(4)?,
-                _ => () // Unused properties
+                _ => (), // Unused properties
             }
         }
         Ok(model)

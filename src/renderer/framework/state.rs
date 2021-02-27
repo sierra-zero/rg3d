@@ -1,28 +1,47 @@
 use crate::{
-    renderer::{
-        framework::{
-            framebuffer::{
-                CullFace,
-                DrawParameters,
-            },
-            gl::{
-                self,
-                types::{
-                    GLuint,
-                    GLboolean,
-                    GLenum,
-                    GLint
-                }
-            }
-        }
-    },
-    core::{
-        math::Rect,
-        color::Color,
+    core::{color::Color, math::Rect},
+    renderer::framework::{
+        framebuffer::{CullFace, DrawParameters},
+        gl::{
+            self,
+            types::{GLboolean, GLenum, GLint, GLuint},
+        },
     },
 };
+use std::fmt::{Display, Formatter};
 
-pub struct State {
+#[derive(Default, Copy, Clone)]
+pub struct PipelineStatistics {
+    pub texture_binding_changes: usize,
+    pub vbo_binding_changes: usize,
+    pub vao_binding_changes: usize,
+    pub blend_state_changes: usize,
+    pub framebuffer_binding_changes: usize,
+    pub program_binding_changes: usize,
+}
+
+impl Display for PipelineStatistics {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Pipeline state changes:\n\
+            \tTextures: {},\n\
+            \tVBO: {},\n\
+            \tVAO: {},\n\
+            \tFBO: {},\n\
+            \tShaders: {},\n\
+            \tBlend: {}",
+            self.texture_binding_changes,
+            self.vbo_binding_changes,
+            self.vao_binding_changes,
+            self.framebuffer_binding_changes,
+            self.program_binding_changes,
+            self.blend_state_changes
+        )
+    }
+}
+
+pub struct PipelineState {
     blend: bool,
     depth_test: bool,
     depth_write: bool,
@@ -34,6 +53,7 @@ pub struct State {
     clear_color: Color,
     clear_stencil: i32,
     clear_depth: f32,
+    scissor_test: bool,
 
     framebuffer: GLuint,
     viewport: Rect<i32>,
@@ -49,6 +69,8 @@ pub struct State {
 
     vao: GLuint,
     vbo: GLuint,
+
+    frame_statistics: PipelineStatistics,
 }
 
 #[derive(Copy, Clone)]
@@ -76,10 +98,10 @@ fn bool_to_gl_bool(v: bool) -> GLboolean {
 
 #[derive(Copy, Clone, PartialOrd, PartialEq, Hash, Debug)]
 pub struct ColorMask {
-    red: bool,
-    green: bool,
-    blue: bool,
-    alpha: bool,
+    pub red: bool,
+    pub green: bool,
+    pub blue: bool,
+    pub alpha: bool,
 }
 
 impl Default for ColorMask {
@@ -138,7 +160,7 @@ impl Default for StencilOp {
     }
 }
 
-impl State {
+impl PipelineState {
     pub fn new() -> Self {
         Self {
             blend: false,
@@ -152,13 +174,9 @@ impl State {
             clear_color: Color::from_rgba(0, 0, 0, 0),
             clear_stencil: 0,
             clear_depth: 1.0,
+            scissor_test: false,
             framebuffer: 0,
-            viewport: Rect {
-                x: 0,
-                y: 0,
-                w: 1,
-                h: 1,
-            },
+            viewport: Rect::new(0, 0, 1, 1),
             blend_src_factor: gl::ONE,
             blend_dst_factor: gl::ZERO,
             program: 0,
@@ -166,7 +184,8 @@ impl State {
             stencil_func: Default::default(),
             stencil_op: Default::default(),
             vao: 0,
-            vbo: 0
+            vbo: 0,
+            frame_statistics: Default::default(),
         }
     }
 
@@ -174,9 +193,9 @@ impl State {
         if self.framebuffer != framebuffer {
             self.framebuffer = framebuffer;
 
-            unsafe {
-                gl::BindFramebuffer(gl::FRAMEBUFFER, self.framebuffer)
-            }
+            self.frame_statistics.framebuffer_binding_changes += 1;
+
+            unsafe { gl::BindFramebuffer(gl::FRAMEBUFFER, self.framebuffer) }
         }
     }
 
@@ -185,7 +204,12 @@ impl State {
             self.viewport = viewport;
 
             unsafe {
-                gl::Viewport(self.viewport.x, self.viewport.y, self.viewport.w, self.viewport.h);
+                gl::Viewport(
+                    self.viewport.x(),
+                    self.viewport.y(),
+                    self.viewport.w(),
+                    self.viewport.h(),
+                );
             }
         }
     }
@@ -193,6 +217,8 @@ impl State {
     pub fn set_blend(&mut self, blend: bool) {
         if self.blend != blend {
             self.blend = blend;
+
+            self.frame_statistics.blend_state_changes += 1;
 
             unsafe {
                 if self.blend {
@@ -233,10 +259,12 @@ impl State {
             self.color_write = color_write;
 
             unsafe {
-                gl::ColorMask(bool_to_gl_bool(self.color_write.red),
-                              bool_to_gl_bool(self.color_write.green),
-                              bool_to_gl_bool(self.color_write.blue),
-                              bool_to_gl_bool(self.color_write.alpha));
+                gl::ColorMask(
+                    bool_to_gl_bool(self.color_write.red),
+                    bool_to_gl_bool(self.color_write.green),
+                    bool_to_gl_bool(self.color_write.blue),
+                    bool_to_gl_bool(self.color_write.alpha),
+                );
             }
         }
     }
@@ -259,9 +287,7 @@ impl State {
         if self.cull_face != cull_face {
             self.cull_face = cull_face;
 
-            unsafe {
-                gl::CullFace(self.cull_face.into_gl_value())
-            }
+            unsafe { gl::CullFace(self.cull_face.into_gl_value()) }
         }
     }
 
@@ -335,6 +361,8 @@ impl State {
         if self.program != program {
             self.program = program;
 
+            self.frame_statistics.program_binding_changes += 1;
+
             unsafe {
                 gl::UseProgram(self.program);
             }
@@ -348,6 +376,8 @@ impl State {
             unit.texture = texture;
             unit.target = target;
 
+            self.frame_statistics.texture_binding_changes += 1;
+
             unsafe {
                 gl::ActiveTexture(gl::TEXTURE0 + sampler_index as u32);
                 gl::BindTexture(target, texture);
@@ -360,7 +390,11 @@ impl State {
             self.stencil_func = func;
 
             unsafe {
-                gl::StencilFunc(self.stencil_func.func, self.stencil_func.ref_value, self.stencil_func.mask);
+                gl::StencilFunc(
+                    self.stencil_func.func,
+                    self.stencil_func.ref_value,
+                    self.stencil_func.mask,
+                );
             }
         }
     }
@@ -370,7 +404,11 @@ impl State {
             self.stencil_op = op;
 
             unsafe {
-                gl::StencilOp(self.stencil_op.fail, self.stencil_op.zfail, self.stencil_op.zpass);
+                gl::StencilOp(
+                    self.stencil_op.fail,
+                    self.stencil_op.zfail,
+                    self.stencil_op.zpass,
+                );
             }
         }
     }
@@ -378,6 +416,8 @@ impl State {
     pub fn set_vertex_array_object(&mut self, vao: GLuint) {
         if self.vao != vao {
             self.vao = vao;
+
+            self.frame_statistics.vao_binding_changes += 1;
 
             unsafe {
                 gl::BindVertexArray(vao);
@@ -389,15 +429,39 @@ impl State {
         if self.vbo != vbo {
             self.vbo = vbo;
 
+            self.frame_statistics.vbo_binding_changes += 1;
+
             unsafe {
                 gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
             }
         }
     }
 
+    pub fn set_scissor_test(&mut self, state: bool) {
+        if self.scissor_test != state {
+            self.scissor_test = state;
+
+            unsafe {
+                if state {
+                    gl::Enable(gl::SCISSOR_TEST);
+                } else {
+                    gl::Disable(gl::SCISSOR_TEST);
+                }
+            }
+        }
+    }
+
+    pub fn set_scissor_box(&mut self, x: i32, y: i32, w: i32, h: i32) {
+        unsafe {
+            gl::Scissor(x, y, w, h);
+        }
+    }
+
     pub fn invalidate_resource_bindings_cache(&mut self) {
         self.texture_units = Default::default();
         self.program = 0;
+
+        self.frame_statistics = Default::default();
     }
 
     pub fn apply_draw_parameters(&mut self, draw_params: &DrawParameters) {
@@ -408,5 +472,9 @@ impl State {
         self.set_stencil_test(draw_params.stencil_test);
         self.set_cull_face(draw_params.cull_face);
         self.set_culling(draw_params.culling);
+    }
+
+    pub fn pipeline_statistics(&self) -> PipelineStatistics {
+        self.frame_statistics
     }
 }

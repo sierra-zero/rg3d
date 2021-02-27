@@ -1,75 +1,27 @@
+#![warn(missing_docs)]
+
+//! Utilities module provides set of commonly used algorithms.
+
 pub mod astar;
+pub mod lightmap;
 pub mod log;
 pub mod navmesh;
 pub mod raw_mesh;
+pub mod uvgen;
 
+use crate::core::algebra::Vector2;
 use crate::{
-    scene::{mesh::Mesh, base::AsBase},
-    physics::static_geometry::{StaticGeometry, StaticTriangle},
-    event::{ElementState, VirtualKeyCode, WindowEvent, MouseScrollDelta},
-    gui::message::{KeyCode, OsEvent, ButtonState},
-    core::{
-        math::vec2::Vec2,
+    event::{ElementState, ModifiersState, MouseScrollDelta, VirtualKeyCode, WindowEvent},
+    gui::{
+        draw,
+        message::{ButtonState, KeyCode, KeyboardModifiers, OsEvent},
     },
-    utils::navmesh::Navmesh,
+    resource::texture::Texture,
 };
-use std::{
-    any::Any,
-    sync::Arc,
-};
-use crate::utils::raw_mesh::RawMeshBuilder;
-use rg3d_core::math::vec3::Vec3;
+use std::hash::Hasher;
+use std::{any::Any, sync::Arc};
 
-/// Small helper that creates static physics geometry from given mesh.
-///
-/// # Notes
-///
-/// This method *bakes* global transform of given mesh into static geometry
-/// data. So if given mesh was at some position with any rotation and scale
-/// resulting static geometry will have vertices that exactly matches given
-/// mesh.
-pub fn mesh_to_static_geometry(mesh: &Mesh) -> StaticGeometry {
-    let mut triangles = Vec::new();
-    let global_transform = mesh.base().global_transform();
-    for surface in mesh.surfaces() {
-        let shared_data = surface.get_data();
-        let shared_data = shared_data.lock().unwrap();
-
-        let vertices = shared_data.get_vertices();
-        for triangle in shared_data.triangles() {
-            let a = global_transform.transform_vector(vertices[triangle[0] as usize].position);
-            let b = global_transform.transform_vector(vertices[triangle[1] as usize].position);
-            let c = global_transform.transform_vector(vertices[triangle[2] as usize].position);
-
-            // Silently ignore degenerated triangles.
-            if let Some(triangle) = StaticTriangle::from_points(&a, &b, &c) {
-                triangles.push(triangle);
-            }
-        }
-    }
-    StaticGeometry::new(triangles)
-}
-
-pub fn mesh_to_navmesh(mesh: &Mesh) -> Navmesh {
-    // Join surfaces into one simple mesh.
-    let mut builder = RawMeshBuilder::<Vec3>::default();
-    let global_transform = mesh.base().global_transform();
-    for surface in mesh.surfaces() {
-        let shared_data = surface.get_data();
-        let shared_data = shared_data.lock().unwrap();
-
-        let vertices = shared_data.get_vertices();
-        for triangle in shared_data.triangles() {
-            builder.insert(global_transform.transform_vector(vertices[triangle[0] as usize].position));
-            builder.insert(global_transform.transform_vector(vertices[triangle[1] as usize].position));
-            builder.insert(global_transform.transform_vector(vertices[triangle[2] as usize].position));
-        }
-    }
-
-    let mesh = builder.build();
-    Navmesh::new(&mesh.triangles, &mesh.vertices)
-}
-
+/// Translated key code to rg3d-ui key code.
 pub fn translate_key(key: VirtualKeyCode) -> KeyCode {
     match key {
         VirtualKeyCode::Key1 => KeyCode::Key1,
@@ -164,7 +116,7 @@ pub fn translate_key(key: VirtualKeyCode) -> KeyCode {
         VirtualKeyCode::Numpad9 => KeyCode::Numpad9,
         VirtualKeyCode::AbntC1 => KeyCode::AbntC1,
         VirtualKeyCode::AbntC2 => KeyCode::AbntC2,
-        VirtualKeyCode::Add => KeyCode::Add,
+        VirtualKeyCode::NumpadAdd => KeyCode::NumpadAdd,
         VirtualKeyCode::Apostrophe => KeyCode::Apostrophe,
         VirtualKeyCode::Apps => KeyCode::Apps,
         VirtualKeyCode::At => KeyCode::At,
@@ -175,8 +127,8 @@ pub fn translate_key(key: VirtualKeyCode) -> KeyCode {
         VirtualKeyCode::Colon => KeyCode::Colon,
         VirtualKeyCode::Comma => KeyCode::Comma,
         VirtualKeyCode::Convert => KeyCode::Convert,
-        VirtualKeyCode::Decimal => KeyCode::Decimal,
-        VirtualKeyCode::Divide => KeyCode::Divide,
+        VirtualKeyCode::NumpadDecimal => KeyCode::NumpadDecimal,
+        VirtualKeyCode::NumpadDivide => KeyCode::NumpadDivide,
         VirtualKeyCode::Equals => KeyCode::Equals,
         VirtualKeyCode::Grave => KeyCode::Grave,
         VirtualKeyCode::Kana => KeyCode::Kana,
@@ -190,7 +142,7 @@ pub fn translate_key(key: VirtualKeyCode) -> KeyCode {
         VirtualKeyCode::MediaSelect => KeyCode::MediaSelect,
         VirtualKeyCode::MediaStop => KeyCode::MediaStop,
         VirtualKeyCode::Minus => KeyCode::Minus,
-        VirtualKeyCode::Multiply => KeyCode::Multiply,
+        VirtualKeyCode::NumpadMultiply => KeyCode::NumpadMultiply,
         VirtualKeyCode::Mute => KeyCode::Mute,
         VirtualKeyCode::MyComputer => KeyCode::MyComputer,
         VirtualKeyCode::NavigateForward => KeyCode::NavigateForward,
@@ -214,7 +166,7 @@ pub fn translate_key(key: VirtualKeyCode) -> KeyCode {
         VirtualKeyCode::Slash => KeyCode::Slash,
         VirtualKeyCode::Sleep => KeyCode::Sleep,
         VirtualKeyCode::Stop => KeyCode::Stop,
-        VirtualKeyCode::Subtract => KeyCode::Subtract,
+        VirtualKeyCode::NumpadSubtract => KeyCode::NumpadSubtract,
         VirtualKeyCode::Sysrq => KeyCode::Sysrq,
         VirtualKeyCode::Tab => KeyCode::Tab,
         VirtualKeyCode::Underline => KeyCode::Underline,
@@ -233,9 +185,53 @@ pub fn translate_key(key: VirtualKeyCode) -> KeyCode {
         VirtualKeyCode::Copy => KeyCode::Copy,
         VirtualKeyCode::Paste => KeyCode::Paste,
         VirtualKeyCode::Cut => KeyCode::Cut,
+        VirtualKeyCode::Asterisk => KeyCode::Asterisk,
+        VirtualKeyCode::Plus => KeyCode::Plus,
     }
 }
 
+/// Translates cursor icon from rg3d-ui library to glutin format.
+pub fn translate_cursor_icon(icon: crate::gui::message::CursorIcon) -> crate::window::CursorIcon {
+    match icon {
+        crate::gui::message::CursorIcon::Default => crate::window::CursorIcon::Default,
+        crate::gui::message::CursorIcon::Crosshair => crate::window::CursorIcon::Crosshair,
+        crate::gui::message::CursorIcon::Hand => crate::window::CursorIcon::Hand,
+        crate::gui::message::CursorIcon::Arrow => crate::window::CursorIcon::Arrow,
+        crate::gui::message::CursorIcon::Move => crate::window::CursorIcon::Move,
+        crate::gui::message::CursorIcon::Text => crate::window::CursorIcon::Text,
+        crate::gui::message::CursorIcon::Wait => crate::window::CursorIcon::Wait,
+        crate::gui::message::CursorIcon::Help => crate::window::CursorIcon::Help,
+        crate::gui::message::CursorIcon::Progress => crate::window::CursorIcon::Progress,
+        crate::gui::message::CursorIcon::NotAllowed => crate::window::CursorIcon::NotAllowed,
+        crate::gui::message::CursorIcon::ContextMenu => crate::window::CursorIcon::ContextMenu,
+        crate::gui::message::CursorIcon::Cell => crate::window::CursorIcon::Cell,
+        crate::gui::message::CursorIcon::VerticalText => crate::window::CursorIcon::VerticalText,
+        crate::gui::message::CursorIcon::Alias => crate::window::CursorIcon::Alias,
+        crate::gui::message::CursorIcon::Copy => crate::window::CursorIcon::Copy,
+        crate::gui::message::CursorIcon::NoDrop => crate::window::CursorIcon::NoDrop,
+        crate::gui::message::CursorIcon::Grab => crate::window::CursorIcon::Grab,
+        crate::gui::message::CursorIcon::Grabbing => crate::window::CursorIcon::Grabbing,
+        crate::gui::message::CursorIcon::AllScroll => crate::window::CursorIcon::AllScroll,
+        crate::gui::message::CursorIcon::ZoomIn => crate::window::CursorIcon::ZoomIn,
+        crate::gui::message::CursorIcon::ZoomOut => crate::window::CursorIcon::ZoomOut,
+        crate::gui::message::CursorIcon::EResize => crate::window::CursorIcon::EResize,
+        crate::gui::message::CursorIcon::NResize => crate::window::CursorIcon::NResize,
+        crate::gui::message::CursorIcon::NeResize => crate::window::CursorIcon::NeResize,
+        crate::gui::message::CursorIcon::NwResize => crate::window::CursorIcon::NwResize,
+        crate::gui::message::CursorIcon::SResize => crate::window::CursorIcon::SResize,
+        crate::gui::message::CursorIcon::SeResize => crate::window::CursorIcon::SeResize,
+        crate::gui::message::CursorIcon::SwResize => crate::window::CursorIcon::SwResize,
+        crate::gui::message::CursorIcon::WResize => crate::window::CursorIcon::WResize,
+        crate::gui::message::CursorIcon::EwResize => crate::window::CursorIcon::EwResize,
+        crate::gui::message::CursorIcon::NsResize => crate::window::CursorIcon::NsResize,
+        crate::gui::message::CursorIcon::NeswResize => crate::window::CursorIcon::NeswResize,
+        crate::gui::message::CursorIcon::NwseResize => crate::window::CursorIcon::NwseResize,
+        crate::gui::message::CursorIcon::ColResize => crate::window::CursorIcon::ColResize,
+        crate::gui::message::CursorIcon::RowResize => crate::window::CursorIcon::RowResize,
+    }
+}
+
+/// Translates window mouse button into rg3d-ui mouse button.
 pub fn translate_button(button: crate::event::MouseButton) -> crate::gui::message::MouseButton {
     match button {
         crate::event::MouseButton::Left => crate::gui::message::MouseButton::Left,
@@ -245,6 +241,7 @@ pub fn translate_button(button: crate::event::MouseButton) -> crate::gui::messag
     }
 }
 
+/// Translates library button state into rg3d-ui button state.
 pub fn translate_state(state: ElementState) -> ButtonState {
     match state {
         ElementState::Pressed => ButtonState::Pressed,
@@ -252,6 +249,7 @@ pub fn translate_state(state: ElementState) -> ButtonState {
     }
 }
 
+/// Translates window event to rg3d-ui event.
 pub fn translate_event(event: &WindowEvent) -> Option<OsEvent> {
     match event {
         WindowEvent::ReceivedCharacter(c) => Some(OsEvent::Character(*c)),
@@ -265,31 +263,38 @@ pub fn translate_event(event: &WindowEvent) -> Option<OsEvent> {
                 None
             }
         }
-        WindowEvent::CursorMoved { position, .. } => {
-            Some(OsEvent::CursorMoved {
-                position: Vec2::new(position.x as f32, position.y as f32)
-            })
-        }
-        WindowEvent::MouseWheel { delta, .. } => {
-            match delta {
-                MouseScrollDelta::LineDelta(x, y) => {
-                    Some(OsEvent::MouseWheel(*x, *y))
-                }
-                MouseScrollDelta::PixelDelta(pos) => {
-                    Some(OsEvent::MouseWheel(pos.x as f32, pos.y as f32))
-                }
+        WindowEvent::CursorMoved { position, .. } => Some(OsEvent::CursorMoved {
+            position: Vector2::new(position.x as f32, position.y as f32),
+        }),
+        WindowEvent::MouseWheel { delta, .. } => match delta {
+            MouseScrollDelta::LineDelta(x, y) => Some(OsEvent::MouseWheel(*x, *y)),
+            MouseScrollDelta::PixelDelta(pos) => {
+                Some(OsEvent::MouseWheel(pos.x as f32, pos.y as f32))
             }
-        }
-        WindowEvent::MouseInput { state, button, .. } => {
-            Some(OsEvent::MouseInput {
-                button: translate_button(*button),
-                state: translate_state(*state),
-            })
-        }
-        _ => None
+        },
+        WindowEvent::MouseInput { state, button, .. } => Some(OsEvent::MouseInput {
+            button: translate_button(*button),
+            state: translate_state(*state),
+        }),
+        &WindowEvent::ModifiersChanged(modifiers) => Some(OsEvent::KeyboardModifiers(
+            translate_keyboard_modifiers(modifiers),
+        )),
+        _ => None,
     }
 }
 
+/// Translates keyboard modifiers to rg3d-ui keyboard modifiers.
+pub fn translate_keyboard_modifiers(modifiers: ModifiersState) -> KeyboardModifiers {
+    KeyboardModifiers {
+        alt: modifiers.alt(),
+        shift: modifiers.shift(),
+        control: modifiers.ctrl(),
+        system: modifiers.logo(),
+    }
+}
+
+/// Maps key code to its name. Can be useful if you making adjustable key bindings in your
+/// game and you need quickly map key code to its name.
 pub fn virtual_key_code_name(code: VirtualKeyCode) -> &'static str {
     match code {
         VirtualKeyCode::Key1 => "1",
@@ -384,7 +389,7 @@ pub fn virtual_key_code_name(code: VirtualKeyCode) -> &'static str {
         VirtualKeyCode::Numpad9 => "Numpad9",
         VirtualKeyCode::AbntC1 => "AbntC1",
         VirtualKeyCode::AbntC2 => "AbntC2",
-        VirtualKeyCode::Add => "Add",
+        VirtualKeyCode::NumpadAdd => "NumpadAdd",
         VirtualKeyCode::Apostrophe => "Apostrophe",
         VirtualKeyCode::Apps => "Apps",
         VirtualKeyCode::At => "At",
@@ -395,8 +400,8 @@ pub fn virtual_key_code_name(code: VirtualKeyCode) -> &'static str {
         VirtualKeyCode::Colon => "Colon",
         VirtualKeyCode::Comma => "Comma",
         VirtualKeyCode::Convert => "Convert",
-        VirtualKeyCode::Decimal => "Decimal",
-        VirtualKeyCode::Divide => "Divide",
+        VirtualKeyCode::NumpadDecimal => "NumpadDecimal",
+        VirtualKeyCode::NumpadDivide => "NumpadDivide",
         VirtualKeyCode::Equals => "Equals",
         VirtualKeyCode::Grave => "Grave",
         VirtualKeyCode::Kana => "Kana",
@@ -410,7 +415,7 @@ pub fn virtual_key_code_name(code: VirtualKeyCode) -> &'static str {
         VirtualKeyCode::MediaSelect => "MediaSelect",
         VirtualKeyCode::MediaStop => "MediaStop",
         VirtualKeyCode::Minus => "Minus",
-        VirtualKeyCode::Multiply => "Multiply",
+        VirtualKeyCode::NumpadMultiply => "NumpadMultiply",
         VirtualKeyCode::Mute => "Mute",
         VirtualKeyCode::MyComputer => "MyComputer",
         VirtualKeyCode::NavigateForward => "NavigateForward",
@@ -434,7 +439,7 @@ pub fn virtual_key_code_name(code: VirtualKeyCode) -> &'static str {
         VirtualKeyCode::Slash => "Slash",
         VirtualKeyCode::Sleep => "Sleep",
         VirtualKeyCode::Stop => "Stop",
-        VirtualKeyCode::Subtract => "Subtract",
+        VirtualKeyCode::NumpadSubtract => "NumpadSubtract",
         VirtualKeyCode::Sysrq => "Sysrq",
         VirtualKeyCode::Tab => "Tab",
         VirtualKeyCode::Underline => "Underline",
@@ -453,12 +458,32 @@ pub fn virtual_key_code_name(code: VirtualKeyCode) -> &'static str {
         VirtualKeyCode::Copy => "Copy",
         VirtualKeyCode::Paste => "Paste",
         VirtualKeyCode::Cut => "Cut",
+        VirtualKeyCode::Asterisk => "Asterisk",
+        VirtualKeyCode::Plus => "Plus",
     }
 }
 
-pub fn into_any_arc<T: Any + Send + Sync>(opt: Option<Arc<T>>) -> Option<Arc<dyn Any + Send + Sync>> {
+/// Helper function to convert Option<Arc<T>> to Option<Arc<dyn Any>>.
+pub fn into_any_arc<T: Any + Send + Sync>(
+    opt: Option<Arc<T>>,
+) -> Option<Arc<dyn Any + Send + Sync>> {
     match opt {
         Some(r) => Some(r),
         None => None,
+    }
+}
+
+/// Converts engine's optional texture "pointer" to rg3d-ui's.
+pub fn into_gui_texture(this: Texture) -> draw::SharedTexture {
+    draw::SharedTexture(this.into_inner())
+}
+
+/// Performs hashing of a sized value by interpreting it as raw memory.
+pub fn hash_as_bytes<T: Sized, H: Hasher>(value: &T, hasher: &mut H) {
+    unsafe {
+        hasher.write(std::slice::from_raw_parts(
+            value as *const T as *const u8,
+            std::mem::size_of::<T>(),
+        ))
     }
 }

@@ -1,58 +1,41 @@
+//! Debug renderer allows you to create debug geometry (wireframe) on the fly. As it said
+//! in its name its purpose - output debug information. It can be used to render collision
+//! shapes, contact information (normals, positions, etc.), paths build by navmesh and so
+//! on. It contains implementations to draw most common shapes (line, box, oob, frustum, etc).
+
 use crate::{
-    core::{
-        scope_profile,
-        color::Color,
-        math::{
-            vec3::Vec3,
-            aabb::AxisAlignedBoundingBox,
-            frustum::Frustum,
-            Rect
-        }
-    },
-    scene::camera::Camera,
+    core::{algebra::Vector3, math::Rect, scope_profile},
     renderer::{
-        RenderPassStatistics,
         error::RendererError,
         framework::{
-            framebuffer::{
-                FrameBufferTrait,
-                DrawParameters,
-                CullFace,
-                FrameBuffer
-            },
+            framebuffer::{CullFace, DrawParameters, FrameBuffer, FrameBufferTrait},
             geometry_buffer::{
-                GeometryBuffer,
-                GeometryBufferKind,
-                AttributeDefinition,
-                AttributeKind,
-                ElementKind
+                AttributeDefinition, AttributeKind, BufferBuilder, ElementKind, GeometryBuffer,
+                GeometryBufferBuilder, GeometryBufferKind,
             },
-            gpu_program::{
-                UniformLocation,
-                GpuProgram,
-                UniformValue
-            },
-            state::State
-        }
-    }
+            gpu_program::{GpuProgram, UniformLocation, UniformValue},
+            state::PipelineState,
+        },
+        RenderPassStatistics,
+    },
+    scene::{camera::Camera, SceneDrawingContext},
 };
-use rg3d_core::math::mat4::Mat4;
 
 #[repr(C)]
 struct Vertex {
-    position: Vec3,
+    position: Vector3<f32>,
     color: u32,
 }
 
+/// See module docs.
 pub struct DebugRenderer {
-    geometry: GeometryBuffer<Vertex>,
-    lines: Vec<Line>,
+    geometry: GeometryBuffer,
     vertices: Vec<Vertex>,
     line_indices: Vec<[u32; 2]>,
     shader: DebugShader,
 }
 
-pub struct DebugShader {
+pub(in crate) struct DebugShader {
     program: GpuProgram,
     wvp_matrix: UniformLocation,
 }
@@ -69,130 +52,42 @@ impl DebugShader {
     }
 }
 
-pub struct Line {
-    pub begin: Vec3,
-    pub end: Vec3,
-    pub color: Color,
-}
-
 impl DebugRenderer {
-    pub(in crate) fn new(state: &mut State) -> Result<Self, RendererError> {
-        let geometry = GeometryBuffer::new(GeometryBufferKind::DynamicDraw, ElementKind::Line);
-
-        geometry.bind(state)
-            .describe_attributes(vec![
-                AttributeDefinition { kind: AttributeKind::Float3, normalized: false },
-                AttributeDefinition { kind: AttributeKind::UnsignedByte4, normalized: true },
-            ])?;
+    pub(in crate) fn new(state: &mut PipelineState) -> Result<Self, RendererError> {
+        let geometry = GeometryBufferBuilder::new(ElementKind::Line)
+            .with_buffer_builder(
+                BufferBuilder::new::<Vertex>(GeometryBufferKind::DynamicDraw, None)
+                    .with_attribute(AttributeDefinition {
+                        location: 0,
+                        divisor: 0,
+                        kind: AttributeKind::Float3,
+                        normalized: false,
+                    })
+                    .with_attribute(AttributeDefinition {
+                        location: 1,
+                        kind: AttributeKind::UnsignedByte4,
+                        normalized: true,
+                        divisor: 0,
+                    }),
+            )
+            .build(state)?;
 
         Ok(Self {
             geometry,
             shader: DebugShader::new()?,
-            lines: Default::default(),
             vertices: Default::default(),
             line_indices: Default::default(),
         })
     }
 
-    pub fn add_line(&mut self, line: Line) {
-        self.lines.push(line);
-    }
-
-    pub fn clear_lines(&mut self) {
-        self.lines.clear()
-    }
-
-    pub fn draw_frustum(&mut self, frustum: &Frustum, color: Color) {
-        let left_top_front = frustum.left_top_front_corner();
-        let left_bottom_front = frustum.left_bottom_front_corner();
-        let right_bottom_front = frustum.right_bottom_front_corner();
-        let right_top_front = frustum.right_top_front_corner();
-
-        let left_top_back = frustum.left_top_back_corner();
-        let left_bottom_back = frustum.left_bottom_back_corner();
-        let right_bottom_back = frustum.right_bottom_back_corner();
-        let right_top_back = frustum.right_top_back_corner();
-
-        // Front face
-        self.add_line(Line { begin: left_top_front, end: right_top_front, color });
-        self.add_line(Line { begin: right_top_front, end: right_bottom_front, color });
-        self.add_line(Line { begin: right_bottom_front, end: left_bottom_front, color });
-        self.add_line(Line { begin: left_bottom_front, end: left_top_front, color });
-
-        // Back face
-        self.add_line(Line { begin: left_top_back, end: right_top_back, color });
-        self.add_line(Line { begin: right_top_back, end: right_bottom_back, color });
-        self.add_line(Line { begin: right_bottom_back, end: left_bottom_back, color });
-        self.add_line(Line { begin: left_bottom_back, end: left_top_back, color });
-
-        // Edges
-        self.add_line(Line { begin: left_top_front, end: left_top_back, color });
-        self.add_line(Line { begin: right_top_front, end: right_top_back, color });
-        self.add_line(Line { begin: right_bottom_front, end: right_bottom_back, color });
-        self.add_line(Line { begin: left_bottom_front, end: left_bottom_back, color });
-    }
-
-    pub fn draw_aabb(&mut self, aabb: &AxisAlignedBoundingBox, color: Color) {
-        let left_bottom_front = Vec3::new(aabb.min.x, aabb.min.y, aabb.max.z);
-        let left_top_front = Vec3::new(aabb.min.x, aabb.max.y, aabb.max.z);
-        let right_top_front = Vec3::new(aabb.max.x, aabb.max.y, aabb.max.z);
-        let right_bottom_front = Vec3::new(aabb.max.x, aabb.min.y, aabb.max.z);
-
-        let left_bottom_back = Vec3::new(aabb.min.x, aabb.min.y, aabb.min.z);
-        let left_top_back = Vec3::new(aabb.min.x, aabb.max.y, aabb.min.z);
-        let right_top_back = Vec3::new(aabb.max.x, aabb.max.y, aabb.min.z);
-        let right_bottom_back = Vec3::new(aabb.max.x, aabb.min.y, aabb.min.z);
-
-        // Front face
-        self.add_line(Line { begin: left_top_front, end: right_top_front, color });
-        self.add_line(Line { begin: right_top_front, end: right_bottom_front, color });
-        self.add_line(Line { begin: right_bottom_front, end: left_bottom_front, color });
-        self.add_line(Line { begin: left_bottom_front, end: left_top_front, color });
-
-        // Back face
-        self.add_line(Line { begin: left_top_back, end: right_top_back, color });
-        self.add_line(Line { begin: right_top_back, end: right_bottom_back, color });
-        self.add_line(Line { begin: right_bottom_back, end: left_bottom_back, color });
-        self.add_line(Line { begin: left_bottom_back, end: left_top_back, color });
-
-        // Edges
-        self.add_line(Line { begin: left_top_front, end: left_top_back, color });
-        self.add_line(Line { begin: right_top_front, end: right_top_back, color });
-        self.add_line(Line { begin: right_bottom_front, end: right_bottom_back, color });
-        self.add_line(Line { begin: left_bottom_front, end: left_bottom_back, color });
-    }
-
-    pub fn draw_oob(&mut self, aabb: &AxisAlignedBoundingBox, transform: Mat4, color: Color) {
-        let left_bottom_front = transform.transform_vector(Vec3::new(aabb.min.x, aabb.min.y, aabb.max.z));
-        let left_top_front = transform.transform_vector(Vec3::new(aabb.min.x, aabb.max.y, aabb.max.z));
-        let right_top_front = transform.transform_vector(Vec3::new(aabb.max.x, aabb.max.y, aabb.max.z));
-        let right_bottom_front = transform.transform_vector(Vec3::new(aabb.max.x, aabb.min.y, aabb.max.z));
-
-        let left_bottom_back = transform.transform_vector(Vec3::new(aabb.min.x, aabb.min.y, aabb.min.z));
-        let left_top_back = transform.transform_vector(Vec3::new(aabb.min.x, aabb.max.y, aabb.min.z));
-        let right_top_back = transform.transform_vector(Vec3::new(aabb.max.x, aabb.max.y, aabb.min.z));
-        let right_bottom_back = transform.transform_vector(Vec3::new(aabb.max.x, aabb.min.y, aabb.min.z));
-
-        // Front face
-        self.add_line(Line { begin: left_top_front, end: right_top_front, color });
-        self.add_line(Line { begin: right_top_front, end: right_bottom_front, color });
-        self.add_line(Line { begin: right_bottom_front, end: left_bottom_front, color });
-        self.add_line(Line { begin: left_bottom_front, end: left_top_front, color });
-
-        // Back face
-        self.add_line(Line { begin: left_top_back, end: right_top_back, color });
-        self.add_line(Line { begin: right_top_back, end: right_bottom_back, color });
-        self.add_line(Line { begin: right_bottom_back, end: left_bottom_back, color });
-        self.add_line(Line { begin: left_bottom_back, end: left_top_back, color });
-
-        // Edges
-        self.add_line(Line { begin: left_top_front, end: left_top_back, color });
-        self.add_line(Line { begin: right_top_front, end: right_top_back, color });
-        self.add_line(Line { begin: right_bottom_front, end: right_bottom_back, color });
-        self.add_line(Line { begin: left_bottom_front, end: left_bottom_back, color });
-    }
-
-    pub(in crate) fn render(&mut self, state: &mut State, viewport: Rect<i32>, framebuffer: &mut FrameBuffer, camera: &Camera) -> RenderPassStatistics {
+    pub(in crate) fn render(
+        &mut self,
+        state: &mut PipelineState,
+        viewport: Rect<i32>,
+        framebuffer: &mut FrameBuffer,
+        drawing_context: &SceneDrawingContext,
+        camera: &Camera,
+    ) -> RenderPassStatistics {
         scope_profile!();
 
         let mut statistics = RenderPassStatistics::default();
@@ -201,35 +96,40 @@ impl DebugRenderer {
         self.line_indices.clear();
 
         let mut i = 0;
-        for line in self.lines.iter() {
+        for line in drawing_context.lines.iter() {
             let color = line.color.into();
-            self.vertices.push(Vertex { position: line.begin, color });
-            self.vertices.push(Vertex { position: line.end, color });
+            self.vertices.push(Vertex {
+                position: line.begin,
+                color,
+            });
+            self.vertices.push(Vertex {
+                position: line.end,
+                color,
+            });
             self.line_indices.push([i, i + 1]);
             i += 2;
         }
-        self.geometry
-            .bind(state)
-            .set_vertices(&self.vertices)
-            .set_lines(&self.line_indices);
+        self.geometry.set_buffer_data(state, 0, &self.vertices);
+        self.geometry.bind(state).set_lines(&self.line_indices);
 
         statistics += framebuffer.draw(
             &self.geometry,
             state,
             viewport,
             &self.shader.program,
-            DrawParameters {
+            &DrawParameters {
                 cull_face: CullFace::Back,
                 culling: false,
                 color_write: Default::default(),
                 depth_write: false,
                 stencil_test: false,
                 depth_test: true,
-                blend: false
+                blend: false,
             },
-            &[
-                (self.shader.wvp_matrix, UniformValue::Mat4(camera.view_projection_matrix()))
-            ]
+            &[(
+                self.shader.wvp_matrix,
+                UniformValue::Matrix4(camera.view_projection_matrix()),
+            )],
         );
 
         statistics.draw_calls += 1;

@@ -1,16 +1,16 @@
+//! Contains all structures and methods to create and manage scene graph nodes.
+//!
+//! Node is enumeration of possible types of scene nodes.
+
 use crate::{
-    core::{
-        visitor::{Visit, VisitResult, Visitor},
-    },
+    core::define_is_as,
+    core::visitor::{Visit, VisitResult, Visitor},
     scene::{
-        light::Light,
-        camera::Camera,
-        base::{Base, AsBase},
-        mesh::Mesh,
+        base::Base, camera::Camera, light::Light, mesh::Mesh, particle_system::ParticleSystem,
         sprite::Sprite,
-        particle_system::ParticleSystem,
-    }
+    },
 };
+use std::ops::{Deref, DerefMut};
 
 /// Helper macros to reduce code bloat - its purpose it to dispatch
 /// specified call by actual enum variant.
@@ -39,55 +39,53 @@ impl Visit for Node {
     }
 }
 
-#[derive(Clone)]
+/// See module docs.
+#[derive(Debug)]
 pub enum Node {
+    /// See Base node docs.
     Base(Base),
+    /// See Light node docs.
     Light(Light),
+    /// See Camera node docs.
     Camera(Camera),
+    /// See Mesh node docs.
     Mesh(Mesh),
+    /// See Sprite node docs.
     Sprite(Sprite),
+    /// See ParticleSystem node docs.
     ParticleSystem(ParticleSystem),
 }
 
-impl AsBase for Node {
-    fn base(&self) -> &Base {
-        static_dispatch!(self, base, )
-    }
+macro_rules! static_dispatch_deref {
+    ($self:ident) => {
+        match $self {
+            Node::Base(v) => v,
+            Node::Mesh(v) => v,
+            Node::Camera(v) => v,
+            Node::Light(v) => v,
+            Node::ParticleSystem(v) => v,
+            Node::Sprite(v) => v,
+        }
+    };
+}
 
-    fn base_mut(&mut self) -> &mut Base {
-        static_dispatch!(self, base_mut, )
+impl Deref for Node {
+    type Target = Base;
+
+    fn deref(&self) -> &Self::Target {
+        static_dispatch_deref!(self)
+    }
+}
+
+impl DerefMut for Node {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        static_dispatch_deref!(self)
     }
 }
 
 impl Default for Node {
     fn default() -> Self {
-        Node::Base(Default::default())
-    }
-}
-
-/// Defines as_(variant), as_mut_(variant) and is_(variant) methods.
-macro_rules! define_is_as {
-    ($is:ident, $as_ref:ident, $as_mut:ident, $kind:ident, $result:ty) => {
-        pub fn $is(&self) -> bool {
-            match self {
-                Node::$kind(_) => true,
-                _ => false
-            }
-        }
-
-        pub fn $as_ref(&self) -> &$result {
-            match self {
-                Node::$kind(ref val) => val,
-                _ => panic!("Cast to {} failed!", stringify!($kind))
-            }
-        }
-
-        pub fn $as_mut(&mut self) -> &mut $result {
-            match self {
-                Node::$kind(ref mut val) => val,
-                _ => panic!("Cast to {} failed!", stringify!($kind))
-            }
-        }
+        Self::Base(Default::default())
     }
 }
 
@@ -95,31 +93,45 @@ impl Node {
     /// Creates new Node based on variant id.
     pub fn from_id(id: u8) -> Result<Self, String> {
         match id {
-            0 => Ok(Node::Base(Default::default())),
-            1 => Ok(Node::Light(Default::default())),
-            2 => Ok(Node::Camera(Default::default())),
-            3 => Ok(Node::Mesh(Default::default())),
-            4 => Ok(Node::Sprite(Default::default())),
-            5 => Ok(Node::ParticleSystem(Default::default())),
-            _ => Err(format!("Invalid node kind {}", id))
+            0 => Ok(Self::Base(Default::default())),
+            1 => Ok(Self::Light(Default::default())),
+            2 => Ok(Self::Camera(Default::default())),
+            3 => Ok(Self::Mesh(Default::default())),
+            4 => Ok(Self::Sprite(Default::default())),
+            5 => Ok(Self::ParticleSystem(Default::default())),
+            _ => Err(format!("Invalid node kind {}", id)),
         }
     }
 
     /// Returns actual variant id.
     pub fn id(&self) -> u8 {
         match self {
-            Node::Base(_) => 0,
-            Node::Light(_) => 1,
-            Node::Camera(_) => 2,
-            Node::Mesh(_) => 3,
-            Node::Sprite(_) => 4,
-            Node::ParticleSystem(_) => 5,
+            Self::Base(_) => 0,
+            Self::Light(_) => 1,
+            Self::Camera(_) => 2,
+            Self::Mesh(_) => 3,
+            Self::Sprite(_) => 4,
+            Self::ParticleSystem(_) => 5,
         }
     }
 
-    define_is_as!(is_mesh, as_mesh, as_mesh_mut, Mesh, Mesh);
-    define_is_as!(is_camera, as_camera, as_camera_mut, Camera, Camera);
-    define_is_as!(is_light, as_light, as_light_mut, Light, Light);
-    define_is_as!(is_particle_system, as_particle_system, as_particle_system_mut, ParticleSystem, ParticleSystem);
-    define_is_as!(is_sprite, as_sprite, as_sprite_mut, Sprite, Sprite);
+    /// This method creates raw copy of a node, it should never be called in normal circumstances
+    /// because internally nodes may (and most likely will) contain handles to other nodes. To
+    /// correctly clone a node you have to use [copy_node](struct.Graph.html#method.copy_node).
+    pub fn raw_copy(&self) -> Self {
+        match self {
+            Node::Base(v) => Node::Base(v.raw_copy()),
+            Node::Light(v) => Node::Light(v.raw_copy()),
+            Node::Camera(v) => Node::Camera(v.raw_copy()),
+            Node::Mesh(v) => Node::Mesh(v.raw_copy()),
+            Node::Sprite(v) => Node::Sprite(v.raw_copy()),
+            Node::ParticleSystem(v) => Node::ParticleSystem(v.raw_copy()),
+        }
+    }
+
+    define_is_as!(Node : Mesh -> ref Mesh => fn is_mesh, fn as_mesh, fn as_mesh_mut);
+    define_is_as!(Node : Camera -> ref Camera => fn is_camera, fn as_camera, fn as_camera_mut);
+    define_is_as!(Node : Light -> ref Light => fn is_light, fn as_light, fn as_light_mut);
+    define_is_as!(Node : ParticleSystem -> ref ParticleSystem => fn is_particle_system, fn as_particle_system, fn as_particle_system_mut);
+    define_is_as!(Node : Sprite -> ref Sprite => fn is_sprite, fn as_sprite, fn as_sprite_mut);
 }

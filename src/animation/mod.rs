@@ -2,55 +2,38 @@ pub mod machine;
 
 use crate::{
     core::{
-        math::{
-            vec3::Vec3,
-            quat::Quat,
-            clampf,
-            wrapf,
-        },
-        visitor::{
-            Visit,
-            VisitResult,
-            Visitor,
-        },
+        algebra::{UnitQuaternion, Vector3},
+        math::{clampf, wrapf},
         pool::{
-            Pool,
-            Handle,
-            PoolIterator,
-            PoolIteratorMut,
-            PoolPairIterator,
-            PoolPairIteratorMut,
+            Handle, Pool, PoolIterator, PoolIteratorMut, PoolPairIterator, PoolPairIteratorMut,
+            Ticket,
         },
+        visitor::{Visit, VisitResult, Visitor},
     },
-    scene::{
-        node::Node,
-        graph::Graph,
-        base::AsBase,
-    },
-    resource::model::Model,
-    utils::log::Log
+    resource::{model::Model, ResourceState},
+    scene::{graph::Graph, node::Node},
+    utils::log::{Log, MessageKind},
 };
 use std::{
-    sync::{
-        Mutex,
-        Arc
-    },
-    collections::{
-        HashMap,
-        VecDeque
-    }
+    collections::{HashMap, VecDeque},
+    ops::{Index, IndexMut},
 };
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct KeyFrame {
-    pub position: Vec3,
-    pub scale: Vec3,
-    pub rotation: Quat,
+    pub position: Vector3<f32>,
+    pub scale: Vector3<f32>,
+    pub rotation: UnitQuaternion<f32>,
     pub time: f32,
 }
 
 impl KeyFrame {
-    pub fn new(time: f32, position: Vec3, scale: Vec3, rotation: Quat) -> Self {
+    pub fn new(
+        time: f32,
+        position: Vector3<f32>,
+        scale: Vector3<f32>,
+        rotation: UnitQuaternion<f32>,
+    ) -> Self {
         Self {
             time,
             position,
@@ -84,6 +67,26 @@ impl Visit for KeyFrame {
     }
 }
 
+#[derive(Default, Copy, Clone, Debug)]
+pub struct PoseEvaluationFlags {
+    pub ignore_position: bool,
+    pub ignore_rotation: bool,
+    pub ignore_scale: bool,
+}
+
+impl Visit for PoseEvaluationFlags {
+    fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
+        visitor.enter_region(name)?;
+
+        self.ignore_position.visit("IgnorePosition", visitor)?;
+        self.ignore_rotation.visit("IgnoreRotation", visitor)?;
+        self.ignore_scale.visit("IgnoreScale", visitor)?;
+
+        visitor.leave_region()
+    }
+}
+
+#[derive(Debug)]
 pub struct Track {
     // Frames are not serialized, because it makes no sense to store them in save file,
     // they will be taken from resource on Resolve stage.
@@ -91,6 +94,7 @@ pub struct Track {
     enabled: bool,
     max_time: f32,
     node: Handle<Node>,
+    flags: PoseEvaluationFlags,
 }
 
 impl Clone for Track {
@@ -100,6 +104,7 @@ impl Clone for Track {
             enabled: self.enabled,
             max_time: self.max_time,
             node: self.node,
+            flags: self.flags,
         }
     }
 }
@@ -111,6 +116,7 @@ impl Default for Track {
             enabled: true,
             max_time: 0.0,
             node: Default::default(),
+            flags: Default::default(),
         }
     }
 }
@@ -122,6 +128,7 @@ impl Visit for Track {
         self.enabled.visit("Enabled", visitor)?;
         self.max_time.visit("MaxTime", visitor)?;
         self.node.visit("Node", visitor)?;
+        let _ = self.flags.visit("Flags", visitor);
 
         visitor.leave_region()
     }
@@ -188,13 +195,11 @@ impl Track {
         }
 
         if time >= self.max_time {
-            return self.frames.last().map(|k| {
-                LocalPose {
-                    node: self.node,
-                    position: k.position,
-                    scale: k.scale,
-                    rotation: k.rotation,
-                }
+            return self.frames.last().map(|k| LocalPose {
+                node: self.node,
+                position: k.position,
+                scale: k.scale,
+                rotation: k.rotation,
             });
         }
 
@@ -209,37 +214,53 @@ impl Track {
         }
 
         if right_index == 0 {
-            return self.frames.first().map(|k| {
-                LocalPose {
-                    node: self.node,
-                    position: k.position,
-                    scale: k.scale,
-                    rotation: k.rotation,
-                }
-            });
-        } else if let Some(left) = self.frames.get(right_index - 1) {
-            if let Some(right) = self.frames.get(right_index) {
-                let interpolator = (time - left.time) / (right.time - left.time);
+            self.frames.first().map(|k| LocalPose {
+                node: self.node,
+                position: k.position,
+                scale: k.scale,
+                rotation: k.rotation,
+            })
+        } else {
+            let left = &self.frames[right_index - 1];
+            let right = &self.frames[right_index];
+            let interpolator = (time - left.time) / (right.time - left.time);
 
-                return Some(LocalPose {
-                    node: self.node,
-                    position: left.position.lerp(&right.position, interpolator),
-                    scale: left.scale.lerp(&right.scale, interpolator),
-                    rotation: left.rotation.slerp(&right.rotation, interpolator),
-                });
-            }
+            Some(LocalPose {
+                node: self.node,
+                position: if self.flags.ignore_position {
+                    Vector3::new(0.0, 0.0, 0.0)
+                } else {
+                    left.position.lerp(&right.position, interpolator)
+                },
+                scale: if self.flags.ignore_scale {
+                    Vector3::new(1.0, 1.0, 1.0)
+                } else {
+                    left.scale.lerp(&right.scale, interpolator)
+                },
+                rotation: if self.flags.ignore_rotation {
+                    UnitQuaternion::default()
+                } else {
+                    left.rotation.nlerp(&right.rotation, interpolator)
+                },
+            })
         }
+    }
 
-        None
+    pub fn flags(&self) -> PoseEvaluationFlags {
+        self.flags
+    }
+
+    pub fn set_flags(&mut self, flags: PoseEvaluationFlags) {
+        self.flags = flags;
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct AnimationEvent {
-    pub signal_id: u64
+    pub signal_id: u64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AnimationSignal {
     id: u64,
     time: f32,
@@ -251,7 +272,7 @@ impl AnimationSignal {
         Self {
             id,
             time,
-            enabled: true
+            enabled: true,
         }
     }
 
@@ -286,6 +307,7 @@ impl Visit for AnimationSignal {
     }
 }
 
+#[derive(Debug)]
 pub struct Animation {
     // TODO: Extract into separate struct AnimationTimeline
     tracks: Vec<Track>,
@@ -295,28 +317,28 @@ pub struct Animation {
     speed: f32,
     looped: bool,
     enabled: bool,
-    pub(in crate) resource: Option<Arc<Mutex<Model>>>,
+    pub(in crate) resource: Option<Model>,
     pose: AnimationPose,
     signals: Vec<AnimationSignal>,
-    events: VecDeque<AnimationEvent>
+    events: VecDeque<AnimationEvent>,
 }
 
 /// Snapshot of scene node local transform state.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LocalPose {
     node: Handle<Node>,
-    position: Vec3,
-    scale: Vec3,
-    rotation: Quat,
+    position: Vector3<f32>,
+    scale: Vector3<f32>,
+    rotation: UnitQuaternion<f32>,
 }
 
 impl Default for LocalPose {
     fn default() -> Self {
         Self {
             node: Handle::NONE,
-            position: Vec3::ZERO,
-            scale: Vec3::UNIT,
-            rotation: Quat::IDENTITY,
+            position: Vector3::default(),
+            scale: Vector3::new(1.0, 1.0, 1.0),
+            rotation: UnitQuaternion::identity(),
         }
     }
 }
@@ -326,8 +348,8 @@ impl LocalPose {
         Self {
             node: self.node,
             position: self.position.scale(weight),
-            rotation: Quat::IDENTITY.nlerp(&self.rotation, weight),
-            scale: Vec3::UNIT, // TODO: Implement scale blending
+            rotation: UnitQuaternion::identity().nlerp(&self.rotation, weight),
+            scale: Vector3::new(1.0, 1.0, 1.0), // TODO: Implement scale blending
         }
     }
 
@@ -336,11 +358,23 @@ impl LocalPose {
         self.rotation = self.rotation.nlerp(&other.rotation, weight);
         // TODO: Implement scale blending
     }
+
+    pub fn position(&self) -> Vector3<f32> {
+        self.position
+    }
+
+    pub fn scale(&self) -> Vector3<f32> {
+        self.scale
+    }
+
+    pub fn rotation(&self) -> UnitQuaternion<f32> {
+        self.rotation
+    }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct AnimationPose {
-    local_poses: HashMap<Handle<Node>, LocalPose>
+    local_poses: HashMap<Handle<Node>, LocalPose>,
 }
 
 impl AnimationPose {
@@ -374,14 +408,28 @@ impl AnimationPose {
     pub fn apply(&self, graph: &mut Graph) {
         for (node, local_pose) in self.local_poses.iter() {
             if node.is_none() {
-                Log::writeln("Invalid node handle found for animation pose, most likely it means that animation retargetting failed!".to_owned());
+                Log::writeln(MessageKind::Error, "Invalid node handle found for animation pose, most likely it means that animation retargetting failed!".to_owned());
             } else {
-                graph.get_mut(*node)
-                    .base_mut()
+                graph[*node]
                     .local_transform_mut()
                     .set_position(local_pose.position)
                     .set_rotation(local_pose.rotation)
                     .set_scale(local_pose.scale);
+            }
+        }
+    }
+
+    /// Calls given callback function for each node and allows you to apply pose with your own
+    /// rules. This could be useful if you need to ignore transform some part of pose for a node.
+    pub fn apply_with<C>(&self, graph: &mut Graph, mut callback: C)
+    where
+        C: FnMut(&mut Node, Handle<Node>, &LocalPose),
+    {
+        for (node, local_pose) in self.local_poses.iter() {
+            if node.is_none() {
+                Log::writeln(MessageKind::Error, "Invalid node handle found for animation pose, most likely it means that animation retargetting failed!".to_owned());
+            } else {
+                callback(&mut graph[*node], *node, local_pose);
             }
         }
     }
@@ -399,7 +447,7 @@ impl Clone for Animation {
             resource: self.resource.clone(),
             pose: Default::default(),
             signals: self.signals.clone(),
-            events: Default::default()
+            events: Default::default(),
         }
     }
 }
@@ -432,6 +480,10 @@ impl Animation {
         self.set_time_position(0.0)
     }
 
+    pub fn length(&self) -> f32 {
+        self.length
+    }
+
     fn tick(&mut self, dt: f32) {
         self.update_pose();
 
@@ -439,10 +491,16 @@ impl Animation {
         let new_time_position = current_time_position + dt * self.get_speed();
 
         for signal in self.signals.iter_mut() {
-            if current_time_position < signal.time && new_time_position >= signal.time {
+            if self.speed >= 0.0
+                && (current_time_position < signal.time && new_time_position >= signal.time)
+                || self.speed < 0.0
+                    && (current_time_position > signal.time && new_time_position <= signal.time)
+            {
                 // TODO: Make this configurable.
                 if self.events.len() < 32 {
-                    self.events.push_back(AnimationEvent { signal_id: signal.id });
+                    self.events.push_back(AnimationEvent {
+                        signal_id: signal.id,
+                    });
                 }
             }
         }
@@ -493,8 +551,15 @@ impl Animation {
         &mut self.tracks
     }
 
-    pub fn get_resource(&self) -> Option<Arc<Mutex<Model>>> {
+    pub fn get_resource(&self) -> Option<Model> {
         self.resource.clone()
+    }
+
+    pub fn retain_tracks<F>(&mut self, filter: F)
+    where
+        F: FnMut(&Track) -> bool,
+    {
+        self.tracks.retain(filter)
     }
 
     pub fn add_signal(&mut self, signal: AnimationSignal) -> &mut Self {
@@ -529,7 +594,7 @@ impl Animation {
                     break;
                 }
             }
-            for child in graph.get(node).base().children() {
+            for child in graph[node].children() {
                 stack.push(*child);
             }
         }
@@ -543,42 +608,72 @@ impl Animation {
         }
     }
 
+    pub fn track_of(&self, handle: Handle<Node>) -> Option<&Track> {
+        for track in self.tracks.iter() {
+            if track.node == handle {
+                return Some(track);
+            }
+        }
+        None
+    }
+
+    pub fn track_of_mut(&mut self, handle: Handle<Node>) -> Option<&mut Track> {
+        for track in self.tracks.iter_mut() {
+            if track.node == handle {
+                return Some(track);
+            }
+        }
+        None
+    }
+
     pub(in crate) fn resolve(&mut self, graph: &Graph) {
         // Copy key frames from resource for each animation. This is needed because we
         // do not store key frames in save file, but just keep reference to resource
         // from which key frames should be taken on load.
         if let Some(resource) = self.resource.clone() {
-            let resource = resource.lock().unwrap();
-            // TODO: Here we assume that resource contains only *one* animation.
-            if let Some(ref_animation) = resource.get_scene().animations.pool.at(0) {
-                for track in self.get_tracks_mut() {
-                    // This may panic if animation has track that refers to a deleted node,
-                    // it can happen if you deleted a node but forgot to remove animation
-                    // that uses this node.
-                    let track_node = graph.get(track.get_node()).base();
+            let resource = resource.state();
+            if let ResourceState::Ok(ref data) = *resource {
+                // TODO: Here we assume that resource contains only *one* animation.
+                if let Some(ref_animation) = data.get_scene().animations.pool.at(0) {
+                    for track in self.get_tracks_mut() {
+                        // This may panic if animation has track that refers to a deleted node,
+                        // it can happen if you deleted a node but forgot to remove animation
+                        // that uses this node.
+                        let track_node = &graph[track.get_node()];
 
-                    // Find corresponding track in resource using names of nodes, not
-                    // original handles of instantiated nodes. We can't use original
-                    // handles here because animation can be targetted to a node that
-                    // wasn't instantiated from animation resource. It can be instantiated
-                    // from some other resource. For example you have a character with
-                    // multiple animations. Character "lives" in its own file without animations
-                    // but with skin. Each animation "lives" in its own file too, then
-                    // you did animation retargetting from animation resource to your character
-                    // instantiated model, which is essentially copies key frames to new
-                    // animation targetted to character instance.
-                    let mut found = false;
-                    for ref_track in ref_animation.get_tracks().iter() {
-                        if track_node.name() == resource.get_scene().graph.get(ref_track.get_node()).base().name() {
-                            track.set_key_frames(ref_track.get_key_frames());
-                            found = true;
-                            break;
+                        // Find corresponding track in resource using names of nodes, not
+                        // original handles of instantiated nodes. We can't use original
+                        // handles here because animation can be targetted to a node that
+                        // wasn't instantiated from animation resource. It can be instantiated
+                        // from some other resource. For example you have a character with
+                        // multiple animations. Character "lives" in its own file without animations
+                        // but with skin. Each animation "lives" in its own file too, then
+                        // you did animation retargetting from animation resource to your character
+                        // instantiated model, which is essentially copies key frames to new
+                        // animation targetted to character instance.
+                        let mut found = false;
+                        for ref_track in ref_animation.get_tracks().iter() {
+                            if track_node.name()
+                                == data.get_scene().graph[ref_track.get_node()].name()
+                            {
+                                track.set_key_frames(ref_track.get_key_frames());
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found {
+                            Log::write(
+                                MessageKind::Error,
+                                format!(
+                                    "Failed to copy key frames for node {}!",
+                                    track_node.name()
+                                ),
+                            );
                         }
                     }
-                    if !found {
-                        Log::write(format!("Failed to copy key frames for node {}!", track_node.name()));
-                    }
                 }
+            } else {
+                unreachable!()
             }
         }
     }
@@ -611,7 +706,7 @@ impl Default for Animation {
             resource: Default::default(),
             pose: Default::default(),
             signals: Default::default(),
-            events: Default::default()
+            events: Default::default(),
         }
     }
 }
@@ -633,8 +728,9 @@ impl Visit for Animation {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct AnimationContainer {
-    pool: Pool<Animation>
+    pool: Pool<Animation>,
 }
 
 impl Default for AnimationContainer {
@@ -645,9 +741,7 @@ impl Default for AnimationContainer {
 
 impl AnimationContainer {
     pub(in crate) fn new() -> Self {
-        Self {
-            pool: Pool::new()
-        }
+        Self { pool: Pool::new() }
     }
 
     #[inline]
@@ -680,6 +774,26 @@ impl AnimationContainer {
         self.pool.free(handle);
     }
 
+    /// Extracts animation from container and reserves its handle. It is used to temporarily take
+    /// ownership over animation, and then put animation back using given ticket.
+    pub fn take_reserve(&mut self, handle: Handle<Animation>) -> (Ticket<Animation>, Animation) {
+        self.pool.take_reserve(handle)
+    }
+
+    /// Puts animation back by given ticket.
+    pub fn put_back(
+        &mut self,
+        ticket: Ticket<Animation>,
+        animation: Animation,
+    ) -> Handle<Animation> {
+        self.pool.put_back(ticket, animation)
+    }
+
+    /// Makes animation handle vacant again.
+    pub fn forget_ticket(&mut self, ticket: Ticket<Animation>) {
+        self.pool.forget_ticket(ticket)
+    }
+
     #[inline]
     pub fn clear(&mut self) {
         self.pool.clear()
@@ -696,16 +810,25 @@ impl AnimationContainer {
     }
 
     #[inline]
-    pub fn retain<P>(&mut self, pred: P) where P: FnMut(&Animation) -> bool {
+    pub fn retain<P>(&mut self, pred: P)
+    where
+        P: FnMut(&Animation) -> bool,
+    {
         self.pool.retain(pred)
     }
 
     pub fn resolve(&mut self, graph: &Graph) {
-        Log::writeln("Resolving animations...".to_owned());
+        Log::writeln(
+            MessageKind::Information,
+            "Resolving animations...".to_owned(),
+        );
         for animation in self.pool.iter_mut() {
             animation.resolve(graph)
         }
-        Log::writeln("Animations resolved successfully!".to_owned());
+        Log::writeln(
+            MessageKind::Information,
+            "Animations resolved successfully!".to_owned(),
+        );
     }
 
     pub fn update_animations(&mut self, dt: f32) {
@@ -726,5 +849,19 @@ impl Visit for AnimationContainer {
         self.pool.visit("Pool", visitor)?;
 
         visitor.leave_region()
+    }
+}
+
+impl Index<Handle<Animation>> for AnimationContainer {
+    type Output = Animation;
+
+    fn index(&self, index: Handle<Animation>) -> &Self::Output {
+        &self.pool[index]
+    }
+}
+
+impl IndexMut<Handle<Animation>> for AnimationContainer {
+    fn index_mut(&mut self, index: Handle<Animation>) -> &mut Self::Output {
+        &mut self.pool[index]
     }
 }

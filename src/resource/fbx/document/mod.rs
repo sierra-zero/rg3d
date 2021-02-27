@@ -1,24 +1,16 @@
 mod ascii;
-mod binary;
 pub mod attribute;
+mod binary;
 
+use crate::core::algebra::Vector3;
 use crate::{
-    resource::fbx::{
-        error::FbxError,
-        document::attribute::FbxAttribute,
-    },
-    core::{
-        math::vec3::Vec3,
-        pool::{
-            Handle,
-            Pool,
-        },
-    },
+    core::pool::{Handle, Pool},
+    resource::fbx::{document::attribute::FbxAttribute, error::FbxError},
 };
 use std::{
     fs::File,
+    io::{BufReader, Read},
     path::Path,
-    io::{Read, BufReader},
 };
 
 pub struct FbxNode {
@@ -40,18 +32,21 @@ impl Default for FbxNode {
 }
 
 impl FbxNode {
-    pub fn get_vec3_at(&self, n: usize) -> Result<Vec3, String> {
-        Ok(Vec3 {
-            x: self.get_attrib(n)?.as_f32()?,
-            y: self.get_attrib(n + 1)?.as_f32()?,
-            z: self.get_attrib(n + 2)?.as_f32()?,
-        })
+    pub fn get_vec3_at(&self, n: usize) -> Result<Vector3<f32>, String> {
+        Ok(Vector3::new(
+            self.get_attrib(n)?.as_f32()?,
+            self.get_attrib(n + 1)?.as_f32()?,
+            self.get_attrib(n + 2)?.as_f32()?,
+        ))
     }
 
     pub fn get_attrib(&self, n: usize) -> Result<&FbxAttribute, String> {
         match self.attributes.get(n) {
             Some(attrib) => Ok(attrib),
-            None => Err(format!("Unable to get {} attribute because index out of bounds.", n))
+            None => Err(format!(
+                "Unable to get {} attribute because index out of bounds.",
+                n
+            )),
         }
     }
 

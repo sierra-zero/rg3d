@@ -4,3 +4,9 @@
 *.lock
 .*
 /*.log
+/*.png
+/examples/data/lightmaps
+/save.bin
+/examples/data/lightmap_scene.rgs
+/rg3d-core/test.bin
+/rg3d-core/test.txt

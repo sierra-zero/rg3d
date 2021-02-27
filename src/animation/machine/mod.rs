@@ -3,6 +3,7 @@
 //! Machine is used to blend multiple animation as well as perform automatic "smooth transition
 //! between states. Let have a quick look at simple machine graph:
 //!
+//! ```text
 //!                                                  +-------------+
 //!                                                  |  Idle Anim  |
 //!                                                  +------+------+
@@ -28,6 +29,7 @@
 //!                                         +------+------+
 //!                                         |  Run Anim   |
 //!                                         +-------------+
+//! ```
 //!
 //! Here we have Walk, Idle, Run states which uses different sources of poses:
 //! - Walk - is most complicated here - it uses result of blending between
@@ -46,7 +48,7 @@
 //! use rg3d::{
 //!     animation::machine::{
 //!         Machine, State, Transition, PoseNode, BlendPose,
-//!         Parameter, PlayAnimation, PoseWeight, BlendAnimation
+//!         Parameter, PlayAnimation, PoseWeight, BlendAnimations
 //!     },
 //!     core::pool::Handle
 //! };
@@ -58,15 +60,12 @@
 //!
 //! let mut machine = Machine::new();
 //!
-//! machine.add_parameter("WalkToIdle", Parameter::Rule(false));
-//! machine.add_parameter("IdleToWalk", Parameter::Rule(false));
-//!
 //! let aim = machine.add_node(PoseNode::PlayAnimation(PlayAnimation::new(aim_animation)));
 //! let walk = machine.add_node(PoseNode::PlayAnimation(PlayAnimation::new(walk_animation)));
 //!
 //! // Blend two animations together
 //! let blend_aim_walk = machine.add_node(PoseNode::BlendAnimations(
-//!     BlendAnimation::new(vec![
+//!     BlendAnimations::new(vec![
 //!         BlendPose::new(PoseWeight::Constant(0.75), aim),
 //!         BlendPose::new(PoseWeight::Constant(0.25), walk)
 //!     ])
@@ -86,34 +85,24 @@
 //! locomotion and other is for combat. This means that locomotion machine will take control over
 //! lower body and combat machine will control upper body.
 
-use std::{
-    cell::{RefCell, Ref},
-    collections::{
-        HashMap,
-        VecDeque,
-    },
-};
+use crate::animation::machine::blend_nodes::IndexedBlendInput;
 use crate::{
-    utils::log::Log,
     animation::{
-        Animation,
-        AnimationContainer,
-        AnimationPose,
+        machine::blend_nodes::{BlendAnimations, BlendAnimationsByIndex, BlendPose},
+        Animation, AnimationContainer, AnimationPose,
     },
     core::{
-        pool::{
-            Pool,
-            Handle,
-            PoolIterator
-        },
-        visitor::{
-            Visit,
-            Visitor,
-            VisitError,
-            VisitResult,
-        },
-    }
+        pool::{Handle, Pool, PoolIterator},
+        visitor::{Visit, VisitResult, Visitor},
+    },
+    utils::log::{Log, MessageKind},
 };
+use std::{
+    cell::{Ref, RefCell},
+    collections::{HashMap, VecDeque},
+};
+
+pub mod blend_nodes;
 
 /// Specific machine event.
 pub enum Event {
@@ -136,7 +125,6 @@ pub struct PlayAnimation {
 
 impl PlayAnimation {
     /// Creates new PlayAnimation node with given animation handle.
-
     pub fn new(animation: Handle<Animation>) -> Self {
         Self {
             animation,
@@ -165,27 +153,32 @@ pub enum Parameter {
 
     /// Rule parameter is used to check where transition from a state to state is possible.
     Rule(bool),
+
+    /// An index of pose.
+    Index(u32),
 }
 
 impl Default for Parameter {
     fn default() -> Self {
-        Parameter::Weight(0.0)
+        Self::Weight(0.0)
     }
 }
 
 impl Parameter {
     fn from_id(id: i32) -> Result<Self, String> {
         match id {
-            0 => Ok(Parameter::Weight(0.0)),
-            1 => Ok(Parameter::Rule(false)),
-            _ => Err(format!("Invalid parameter id {}", id))
+            0 => Ok(Self::Weight(0.0)),
+            1 => Ok(Self::Rule(false)),
+            2 => Ok(Self::Index(0)),
+            _ => Err(format!("Invalid parameter id {}", id)),
         }
     }
 
     fn id(self) -> i32 {
         match self {
-            Parameter::Weight(_) => 0,
-            Parameter::Rule(_) => 1,
+            Self::Weight(_) => 0,
+            Self::Rule(_) => 1,
+            Self::Index(_) => 2,
         }
     }
 }
@@ -201,8 +194,9 @@ impl Visit for Parameter {
         }
 
         match self {
-            Parameter::Weight(weight) => weight.visit("Value", visitor)?,
-            Parameter::Rule(rule) => rule.visit("Value", visitor)?,
+            Self::Weight(weight) => weight.visit("Value", visitor)?,
+            Self::Rule(rule) => rule.visit("Value", visitor)?,
+            Self::Index(index) => index.visit("Value", visitor)?,
         }
 
         visitor.leave_region()
@@ -221,23 +215,23 @@ pub enum PoseWeight {
 
 impl Default for PoseWeight {
     fn default() -> Self {
-        PoseWeight::Constant(0.0)
+        Self::Constant(0.0)
     }
 }
 
 impl PoseWeight {
     fn from_id(id: i32) -> Result<Self, String> {
         match id {
-            0 => Ok(PoseWeight::Parameter(Default::default())),
-            1 => Ok(PoseWeight::Constant(0.0)),
-            _ => Err(format!("Invalid pose weight id {}", id))
+            0 => Ok(Self::Parameter(Default::default())),
+            1 => Ok(Self::Constant(0.0)),
+            _ => Err(format!("Invalid pose weight id {}", id)),
         }
     }
 
     fn id(&self) -> i32 {
         match self {
-            PoseWeight::Constant(_) => 0,
-            PoseWeight::Parameter(_) => 1,
+            Self::Parameter(_) => 0,
+            Self::Constant(_) => 1,
         }
     }
 }
@@ -261,125 +255,57 @@ impl Visit for PoseWeight {
     }
 }
 
-/// Weighted proxy for animation pose.
-#[derive(Default)]
-pub struct BlendPose {
-    weight: PoseWeight,
-    pose_source: Handle<PoseNode>,
-}
-
-impl BlendPose {
-    /// Creates new instance of blend pose with given weight and animation pose.
-    pub fn new(weight: PoseWeight, pose_source: Handle<PoseNode>) -> Self {
-        Self {
-            weight,
-            pose_source,
-        }
-    }
-
-    /// Specialized constructor that creates blend pose with constant weight.
-    /// `weight` should be positive.
-    pub fn with_constant_weight(weight: f32, pose_source: Handle<PoseNode>) -> Self {
-        Self {
-            weight: PoseWeight::Constant(weight),
-            pose_source
-        }
-    }
-
-    /// Specialized constructor that creates blend pose with parametrized weight.
-    /// `param_id` must be name of Weight parameter in machine.
-    pub fn with_param_weight(param_id: &str, pose_source: Handle<PoseNode>) -> Self {
-        Self {
-            weight: PoseWeight::Parameter(param_id.to_owned()),
-            pose_source
-        }
-    }
-}
-
-impl Visit for BlendPose {
-    fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
-        visitor.enter_region(name)?;
-
-        self.weight.visit("Weight", visitor)?;
-        self.pose_source.visit("PoseSource", visitor)?;
-
-        visitor.leave_region()
-    }
-}
-
-/// Animation blend node. It takes multiple input poses and mixes them together into
-/// single pose with specified weights. Could be used to mix hit and run animations
-/// for example - once your character got hit, you set some significant weight for
-/// hit animation (0.8 for example) and lower weight for run animation (0.2) and it
-/// will look like your character got wounded while it still running (probably you
-/// should decrease speed here too). Weights can be parametrized, which means that
-/// you can dynamically change them in runtime. In our example we can decrease weight
-/// of hit animation over time and increase weight of run animation, so character will
-/// recover from his wounds.
-#[derive(Default)]
-pub struct BlendAnimation {
-    pose_sources: RefCell<Vec<BlendPose>>,
-    output_pose: RefCell<AnimationPose>,
-}
-
-impl BlendAnimation {
-    /// Creates new animation blend node with given poses.
-    pub fn new(poses: Vec<BlendPose>) -> Self {
-        Self {
-            pose_sources: RefCell::new(poses),
-            output_pose: Default::default(),
-        }
-    }
-}
-
-impl Visit for BlendAnimation {
-    fn visit(&mut self, name: &str, visitor: &mut Visitor) -> Result<(), VisitError> {
-        visitor.enter_region(name)?;
-
-        self.pose_sources.visit("PoseSources", visitor)?;
-
-        visitor.leave_region()
-    }
-}
-
 /// Specialized node that provides animation pose. See documentation for each variant.
 pub enum PoseNode {
     /// See docs for `PlayAnimation`.
     PlayAnimation(PlayAnimation),
 
-    /// See docs for `BlendAnimation`.
-    BlendAnimations(BlendAnimation),
+    /// See docs for `BlendAnimations`.
+    BlendAnimations(BlendAnimations),
+
+    /// See docs for `BlendAnimationsByIndex`.
+    BlendAnimationsByIndex(BlendAnimationsByIndex),
 }
 
 impl Default for PoseNode {
     fn default() -> Self {
-        PoseNode::PlayAnimation(Default::default())
+        Self::PlayAnimation(Default::default())
     }
 }
 
 impl PoseNode {
     /// Creates new node that plays animation.
     pub fn make_play_animation(animation: Handle<Animation>) -> Self {
-        PoseNode::PlayAnimation(PlayAnimation::new(animation))
+        Self::PlayAnimation(PlayAnimation::new(animation))
     }
 
     /// Creates new node that blends multiple poses.
     pub fn make_blend_animations(poses: Vec<BlendPose>) -> Self {
-        PoseNode::BlendAnimations(BlendAnimation::new(poses))
+        Self::BlendAnimations(BlendAnimations::new(poses))
+    }
+
+    /// Creates new node that blends multiple poses.
+    pub fn make_blend_animations_by_index(
+        index_parameter: String,
+        inputs: Vec<IndexedBlendInput>,
+    ) -> Self {
+        Self::BlendAnimationsByIndex(BlendAnimationsByIndex::new(index_parameter, inputs))
     }
 
     fn from_id(id: i32) -> Result<Self, String> {
         match id {
-            0 => Ok(PoseNode::PlayAnimation(Default::default())),
-            1 => Ok(PoseNode::BlendAnimations(Default::default())),
-            _ => Err(format!("Invalid pose node id {}", id))
+            0 => Ok(Self::PlayAnimation(Default::default())),
+            1 => Ok(Self::BlendAnimations(Default::default())),
+            2 => Ok(Self::BlendAnimationsByIndex(Default::default())),
+            _ => Err(format!("Invalid pose node id {}", id)),
         }
     }
 
     fn id(&self) -> i32 {
         match self {
-            PoseNode::PlayAnimation(_) => 0,
-            PoseNode::BlendAnimations(_) => 1,
+            Self::PlayAnimation(_) => 0,
+            Self::BlendAnimations(_) => 1,
+            Self::BlendAnimationsByIndex(_) => 2,
         }
     }
 }
@@ -389,6 +315,7 @@ macro_rules! static_dispatch {
         match $self {
             PoseNode::PlayAnimation(v) => v.$func($($args),*),
             PoseNode::BlendAnimations(v) => v.$func($($args),*),
+            PoseNode::BlendAnimationsByIndex(v) => v.$func($($args),*),
         }
     };
 }
@@ -416,47 +343,40 @@ pub struct State {
 type ParameterContainer = HashMap<String, Parameter>;
 
 trait EvaluatePose {
-    fn eval_pose(&self, nodes: &Pool<PoseNode>, params: &ParameterContainer, animations: &AnimationContainer) -> Ref<AnimationPose>;
+    fn eval_pose(
+        &self,
+        nodes: &Pool<PoseNode>,
+        params: &ParameterContainer,
+        animations: &AnimationContainer,
+        dt: f32,
+    ) -> Ref<AnimationPose>;
 }
 
 impl EvaluatePose for PlayAnimation {
-    fn eval_pose(&self, _nodes: &Pool<PoseNode>, _params: &ParameterContainer, animations: &AnimationContainer) -> Ref<AnimationPose> {
-        animations.get(self.animation)
+    fn eval_pose(
+        &self,
+        _nodes: &Pool<PoseNode>,
+        _params: &ParameterContainer,
+        animations: &AnimationContainer,
+        _dt: f32,
+    ) -> Ref<AnimationPose> {
+        animations
+            .get(self.animation)
             .get_pose()
             .clone_into(&mut self.output_pose.borrow_mut());
         self.output_pose.borrow()
     }
 }
 
-impl EvaluatePose for BlendAnimation {
-    fn eval_pose(&self, nodes: &Pool<PoseNode>, params: &ParameterContainer, animations: &AnimationContainer) -> Ref<AnimationPose> {
-        self.output_pose.borrow_mut().reset();
-        for blend_pose in self.pose_sources.borrow_mut().iter_mut() {
-            let weight = match blend_pose.weight {
-                PoseWeight::Constant(value) => value,
-                PoseWeight::Parameter(ref param_id) => {
-                    if let Some(param) = params.get(param_id) {
-                        if let Parameter::Weight(weight) = param {
-                            *weight
-                        } else {
-                            0.0
-                        }
-                    } else {
-                        0.0
-                    }
-                }
-            };
-
-            let pose_source = nodes.borrow(blend_pose.pose_source).eval_pose(nodes, params, animations);
-            self.output_pose.borrow_mut().blend_with(&pose_source, weight);
-        }
-        self.output_pose.borrow()
-    }
-}
-
 impl EvaluatePose for PoseNode {
-    fn eval_pose(&self, nodes: &Pool<PoseNode>, params: &ParameterContainer, animations: &AnimationContainer) -> Ref<AnimationPose> {
-        static_dispatch!(self, eval_pose, nodes, params, animations)
+    fn eval_pose(
+        &self,
+        nodes: &Pool<PoseNode>,
+        params: &ParameterContainer,
+        animations: &AnimationContainer,
+        dt: f32,
+    ) -> Ref<AnimationPose> {
+        static_dispatch!(self, eval_pose, nodes, params, animations, dt)
     }
 }
 
@@ -470,11 +390,22 @@ impl State {
         }
     }
 
-    fn update(&mut self, nodes: &Pool<PoseNode>, params: &ParameterContainer, animations: &AnimationContainer) {
+    fn update(
+        &mut self,
+        nodes: &Pool<PoseNode>,
+        params: &ParameterContainer,
+        animations: &AnimationContainer,
+        dt: f32,
+    ) {
         self.pose.reset();
-        nodes.borrow(self.root)
-            .eval_pose(nodes, params, animations)
+        nodes
+            .borrow(self.root)
+            .eval_pose(nodes, params, animations, dt)
             .clone_into(&mut self.pose);
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
@@ -522,7 +453,13 @@ impl Visit for Transition {
 }
 
 impl Transition {
-    pub fn new(name: &str, src: Handle<State>, dest: Handle<State>, time: f32, rule: &str) -> Transition {
+    pub fn new(
+        name: &str,
+        src: Handle<State>,
+        dest: Handle<State>,
+        time: f32,
+        rule: &str,
+    ) -> Transition {
         Self {
             name: name.to_owned(),
             transition_time: time,
@@ -604,7 +541,7 @@ impl LimitedEventQueue {
     fn new(limit: u32) -> Self {
         Self {
             queue: VecDeque::with_capacity(limit as usize),
-            limit
+            limit,
         }
     }
 
@@ -639,10 +576,16 @@ impl Machine {
         self.nodes.spawn(node)
     }
 
-    pub fn set_parameter(&mut self, id: &str, parameter: Parameter) -> &mut Self {
-        self.parameters.entry(id.to_owned())
-            .and_modify(|p| *p = parameter)
-            .or_insert(parameter);
+    pub fn set_parameter(&mut self, id: &str, new_value: Parameter) -> &mut Self {
+        match self.parameters.get_mut(id) {
+            Some(parameter) => {
+                *parameter = new_value;
+            }
+            None => {
+                self.parameters.insert(id.to_owned(), new_value);
+            }
+        }
+
         self
     }
 
@@ -663,13 +606,16 @@ impl Machine {
         state
     }
 
-    pub fn add_transition(&mut self, transition: Transition) -> &mut Self {
-        let _ = self.transitions.spawn(transition);
-        self
+    pub fn add_transition(&mut self, transition: Transition) -> Handle<Transition> {
+        self.transitions.spawn(transition)
     }
 
     pub fn get_state(&self, state: Handle<State>) -> &State {
-        self.states.borrow(state)
+        &self.states[state]
+    }
+
+    pub fn get_transition(&self, transition: Handle<Transition>) -> &Transition {
+        &self.transitions[transition]
     }
 
     pub fn pop_event(&mut self) -> Option<Event> {
@@ -706,33 +652,45 @@ impl Machine {
         if self.active_state.is_some() || self.active_transition.is_some() {
             // Gather actual poses for each state.
             for state in self.states.iter_mut() {
-                state.update(&self.nodes, &self.parameters, animations);
+                state.update(&self.nodes, &self.parameters, animations, dt);
             }
 
             if self.active_transition.is_none() {
                 // Find transition.
                 for (handle, transition) in self.transitions.pair_iter_mut() {
-                    if transition.dest == self.active_state || transition.source != self.active_state {
+                    if transition.dest == self.active_state
+                        || transition.source != self.active_state
+                    {
                         continue;
                     }
-                    if let Some(rule) = self.parameters.get(&transition.rule) {
-                        if let Parameter::Rule(active) = rule {
-                            if *active {
-                                self.events.push(Event::StateLeave(self.active_state));
-                                if self.debug {
-                                    Log::writeln(format!("Leaving state: {}", self.states.borrow(self.active_state).name));
-                                }
-
-                                self.events.push(Event::StateEnter(transition.source));
-                                if self.debug {
-                                    Log::writeln(format!("Entering state: {}", self.states.borrow(transition.source).name));
-                                }
-
-                                self.active_state = Handle::NONE;
-                                self.active_transition = handle;
-
-                                break;
+                    if let Some(Parameter::Rule(active)) = self.parameters.get(&transition.rule) {
+                        if *active {
+                            self.events.push(Event::StateLeave(self.active_state));
+                            if self.debug {
+                                Log::writeln(
+                                    MessageKind::Information,
+                                    format!(
+                                        "Leaving state: {}",
+                                        self.states[self.active_state].name
+                                    ),
+                                );
                             }
+
+                            self.events.push(Event::StateEnter(transition.source));
+                            if self.debug {
+                                Log::writeln(
+                                    MessageKind::Information,
+                                    format!(
+                                        "Entering state: {}",
+                                        self.states[transition.source].name
+                                    ),
+                                );
+                            }
+
+                            self.active_state = Handle::NONE;
+                            self.active_transition = handle;
+
+                            break;
                         }
                     }
                 }
@@ -740,11 +698,15 @@ impl Machine {
 
             // Double check for active transition because we can have empty machine.
             if self.active_transition.is_some() {
-                let transition = self.transitions.borrow_mut(self.active_transition);
+                let transition = &mut self.transitions[self.active_transition];
 
                 // Blend between source and dest states.
-                self.final_pose.blend_with(&self.states.borrow_mut(transition.source).pose, 1.0 - transition.blend_factor);
-                self.final_pose.blend_with(&self.states.borrow_mut(transition.dest).pose, transition.blend_factor);
+                self.final_pose.blend_with(
+                    &self.states[transition.source].pose,
+                    1.0 - transition.blend_factor,
+                );
+                self.final_pose
+                    .blend_with(&self.states[transition.dest].pose, transition.blend_factor);
 
                 transition.update(dt);
 
@@ -752,18 +714,25 @@ impl Machine {
                     transition.reset();
                     self.active_transition = Handle::NONE;
                     self.active_state = transition.dest;
-                    self.events.push(Event::ActiveStateChanged(self.active_state));
+                    self.events
+                        .push(Event::ActiveStateChanged(self.active_state));
 
                     if self.debug {
-                        Log::writeln(format!("Active state changed: {}", self.states.borrow(self.active_state).name));
+                        Log::writeln(
+                            MessageKind::Information,
+                            format!(
+                                "Active state changed: {}",
+                                self.states[self.active_state].name
+                            ),
+                        );
                     }
                 }
             } else {
                 // We must have active state all the time when we do not have any active transition.
-                let state = self.states.borrow_mut(self.active_state);
-
                 // Just get pose from active state.
-                state.pose.clone_into(&mut self.final_pose);
+                self.states[self.active_state]
+                    .pose
+                    .clone_into(&mut self.final_pose);
             }
         }
 

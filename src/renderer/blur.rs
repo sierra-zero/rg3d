@@ -1,45 +1,27 @@
-use std::{
-    rc::Rc,
-    cell::RefCell,
-};
 use crate::{
     core::{
+        algebra::{Matrix4, Vector3},
+        math::Rect,
         scope_profile,
-        math::{
-            mat4::Mat4,
-            Rect,
-            vec3::Vec3,
-        },
     },
     renderer::{
-        framework::{
-            gpu_program::{
-                UniformValue,
-                GpuProgram,
-                UniformLocation,
-            },
-            framebuffer::{
-                DrawParameters,
-                CullFace,
-                FrameBuffer,
-                Attachment,
-                AttachmentKind,
-                FrameBufferTrait,
-            },
-            gpu_texture::{
-                GpuTexture,
-                GpuTextureKind,
-                PixelKind,
-                Coordinate,
-                WrapMode,
-            },
-            state::State,
-        },
         error::RendererError,
-        GeometryCache,
+        framework::{
+            framebuffer::{
+                Attachment, AttachmentKind, CullFace, DrawParameters, FrameBuffer, FrameBufferTrait,
+            },
+            gpu_program::{GpuProgram, UniformLocation, UniformValue},
+            gpu_texture::{
+                Coordinate, GpuTexture, GpuTextureKind, MagnificationFilter, MinificationFilter,
+                PixelKind, WrapMode,
+            },
+            state::PipelineState,
+        },
         surface::SurfaceSharedData,
+        GeometryCache,
     },
 };
+use std::{cell::RefCell, rc::Rc};
 
 struct Shader {
     program: GpuProgram,
@@ -70,11 +52,24 @@ pub struct Blur {
 }
 
 impl Blur {
-    pub fn new(state: &mut State, width: usize, height: usize) -> Result<Self, RendererError> {
+    pub fn new(
+        state: &mut PipelineState,
+        width: usize,
+        height: usize,
+    ) -> Result<Self, RendererError> {
         let frame = {
             let kind = GpuTextureKind::Rectangle { width, height };
-            let mut texture = GpuTexture::new(state, kind, PixelKind::F32, None)?;
-            texture.bind_mut(state, 0)
+            let mut texture = GpuTexture::new(
+                state,
+                kind,
+                PixelKind::F32,
+                MinificationFilter::Nearest,
+                MagnificationFilter::Nearest,
+                1,
+                None,
+            )?;
+            texture
+                .bind_mut(state, 0)
                 .set_wrap(Coordinate::S, WrapMode::ClampToEdge)
                 .set_wrap(Coordinate::T, WrapMode::ClampToEdge);
             texture
@@ -85,12 +80,10 @@ impl Blur {
             framebuffer: FrameBuffer::new(
                 state,
                 None,
-                vec![
-                    Attachment {
-                        kind: AttachmentKind::Color,
-                        texture: Rc::new(RefCell::new(frame)),
-                    }
-                ],
+                vec![Attachment {
+                    kind: AttachmentKind::Color,
+                    texture: Rc::new(RefCell::new(frame)),
+                }],
             )?,
             quad: SurfaceSharedData::make_unit_xy_quad(),
             width,
@@ -102,10 +95,11 @@ impl Blur {
         self.framebuffer.color_attachments()[0].texture.clone()
     }
 
-    pub fn render(&mut self,
-                  state: &mut State,
-                  geom_cache: &mut GeometryCache,
-                  input: Rc<RefCell<GpuTexture>>,
+    pub(in crate) fn render(
+        &mut self,
+        state: &mut PipelineState,
+        geom_cache: &mut GeometryCache,
+        input: Rc<RefCell<GpuTexture>>,
     ) {
         scope_profile!();
 
@@ -116,7 +110,7 @@ impl Blur {
             state,
             viewport,
             &self.shader.program,
-            DrawParameters {
+            &DrawParameters {
                 cull_face: CullFace::Back,
                 culling: false,
                 color_write: Default::default(),
@@ -126,11 +120,30 @@ impl Blur {
                 blend: false,
             },
             &[
-                (self.shader.world_view_projection_matrix, UniformValue::Mat4(
-                    Mat4::ortho(0.0, viewport.w as f32, viewport.h as f32, 0.0, -1.0, 1.0) *
-                        Mat4::scale(Vec3::new(viewport.w as f32, viewport.h as f32, 0.0))
-                )),
-                (self.shader.input_texture, UniformValue::Sampler { index: 0, texture: input })
+                (
+                    self.shader.world_view_projection_matrix,
+                    UniformValue::Matrix4(
+                        Matrix4::new_orthographic(
+                            0.0,
+                            viewport.w() as f32,
+                            viewport.h() as f32,
+                            0.0,
+                            -1.0,
+                            1.0,
+                        ) * Matrix4::new_nonuniform_scaling(&Vector3::new(
+                            viewport.w() as f32,
+                            viewport.h() as f32,
+                            0.0,
+                        )),
+                    ),
+                ),
+                (
+                    self.shader.input_texture,
+                    UniformValue::Sampler {
+                        index: 0,
+                        texture: input,
+                    },
+                ),
             ],
         );
     }

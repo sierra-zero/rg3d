@@ -1,42 +1,20 @@
 use crate::{
-    scene::{
-        node::Node,
-        base::AsBase,
-        graph::Graph,
-        camera::Camera,
-    },
-    core::{
-        scope_profile,
-        math::Rect,
-    },
+    core::{math::Matrix4Ext, math::Rect, scope_profile},
     renderer::{
-        TextureCache,
-        GeometryCache,
-        surface::SurfaceSharedData,
         error::RendererError,
         framework::{
-            gpu_texture::GpuTexture,
+            framebuffer::{CullFace, DrawParameters, FrameBuffer, FrameBufferTrait},
             gl,
-            gpu_program::{
-                UniformValue,
-                GpuProgram,
-                UniformLocation,
-            },
-            framebuffer::{
-                FrameBuffer,
-                DrawParameters,
-                CullFace,
-                FrameBufferTrait,
-            },
-            state::State,
+            gpu_program::{GpuProgram, UniformLocation, UniformValue},
+            gpu_texture::GpuTexture,
+            state::PipelineState,
         },
-        RenderPassStatistics,
+        surface::SurfaceSharedData,
+        GeometryCache, RenderPassStatistics, TextureCache,
     },
+    scene::{camera::Camera, graph::Graph, node::Node},
 };
-use std::{
-    rc::Rc,
-    cell::RefCell,
-};
+use std::{cell::RefCell, rc::Rc};
 
 struct SpriteShader {
     program: GpuProgram,
@@ -74,8 +52,8 @@ pub struct SpriteRenderer {
     surface: SurfaceSharedData,
 }
 
-pub struct SpriteRenderContext<'a, 'b, 'c> {
-    pub state: &'a mut State,
+pub(in crate) struct SpriteRenderContext<'a, 'b, 'c> {
+    pub state: &'a mut PipelineState,
     pub framebuffer: &'b mut FrameBuffer,
     pub graph: &'c Graph,
     pub camera: &'c Camera,
@@ -96,15 +74,20 @@ impl SpriteRenderer {
     }
 
     #[must_use]
-    pub fn render(&mut self, args: SpriteRenderContext) -> RenderPassStatistics {
+    pub(in crate) fn render(&mut self, args: SpriteRenderContext) -> RenderPassStatistics {
         scope_profile!();
 
         let mut statistics = RenderPassStatistics::default();
 
         let SpriteRenderContext {
-            state, framebuffer, graph,
-            camera, white_dummy, viewport,
-            textures, geom_map
+            state,
+            framebuffer,
+            graph,
+            camera,
+            white_dummy,
+            viewport,
+            textures,
+            geom_map,
         } = args;
 
         state.set_blend_func(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
@@ -114,13 +97,17 @@ impl SpriteRenderer {
         let camera_up = inv_view.up();
         let camera_side = inv_view.side();
 
-        for node in graph.linear_iter() {
-            let sprite = if let Node::Sprite(sprite) = node {
-                sprite
-            } else {
-                continue;
-            };
+        for sprite in graph.linear_iter().filter_map(|node| {
+            if !node.global_visibility() {
+                return None;
+            }
 
+            if let Node::Sprite(sprite) = node {
+                Some(sprite)
+            } else {
+                None
+            }
+        }) {
             let diffuse_texture = if let Some(texture) = sprite.texture() {
                 if let Some(texture) = textures.get(state, texture) {
                     texture
@@ -136,7 +123,7 @@ impl SpriteRenderer {
                 state,
                 viewport,
                 &self.shader.program,
-                DrawParameters {
+                &DrawParameters {
                     cull_face: CullFace::Back,
                     culling: true,
                     color_write: Default::default(),
@@ -146,17 +133,32 @@ impl SpriteRenderer {
                     blend: true,
                 },
                 &[
-                    (self.shader.diffuse_texture, UniformValue::Sampler {
-                        index: 0,
-                        texture: diffuse_texture,
-                    }),
-                    (self.shader.view_projection_matrix, UniformValue::Mat4(camera.view_projection_matrix())),
-                    (self.shader.world_matrix, UniformValue::Mat4(node.base().global_transform())),
-                    (self.shader.camera_up_vector, UniformValue::Vec3(camera_up)),
-                    (self.shader.camera_side_vector, UniformValue::Vec3(camera_side)),
+                    (
+                        self.shader.diffuse_texture,
+                        UniformValue::Sampler {
+                            index: 0,
+                            texture: diffuse_texture,
+                        },
+                    ),
+                    (
+                        self.shader.view_projection_matrix,
+                        UniformValue::Matrix4(camera.view_projection_matrix()),
+                    ),
+                    (
+                        self.shader.world_matrix,
+                        UniformValue::Matrix4(sprite.global_transform()),
+                    ),
+                    (
+                        self.shader.camera_up_vector,
+                        UniformValue::Vector3(camera_up),
+                    ),
+                    (
+                        self.shader.camera_side_vector,
+                        UniformValue::Vector3(camera_side),
+                    ),
                     (self.shader.size, UniformValue::Float(sprite.size())),
                     (self.shader.color, UniformValue::Color(sprite.color())),
-                    (self.shader.rotation, UniformValue::Float(sprite.rotation()))
+                    (self.shader.rotation, UniformValue::Float(sprite.rotation())),
                 ],
             );
         }
